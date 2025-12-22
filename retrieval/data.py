@@ -12,8 +12,13 @@ from .config import RetrievalConfig
 
 DATASET_REGISTRY = {
     "flickr30k": "nlphuji/flickr30k",
-    # coco captions variants on HF; we'll try these in order
-    "coco_captions": ["coco_captions", "HuggingFaceM4/coco_captions"],
+    # coco captions variants on HF; we'll try these in order (with optional configs)
+    "coco_captions": [
+        ("coco_captions", "2017"),
+        ("coco_captions", "2014"),
+        ("coco_captions", None),
+        ("HuggingFaceM4/coco_captions", None),
+    ],
 }
 
 
@@ -142,14 +147,18 @@ def load_coco_captions(config: RetrievalConfig) -> List[Dict]:
     tried: List[str] = []
     last_err: Exception | None = None
     ds_all = None
-    for name in DATASET_REGISTRY["coco_captions"]:
-        tried.append(name)
+    for name, cfg in DATASET_REGISTRY["coco_captions"]:
+        tag = name if cfg is None else f"{name}:{cfg}"
+        tried.append(tag)
         try:
-            ds_all = load_dataset(name)
+            if cfg is None:
+                ds_all = load_dataset(name)
+            else:
+                ds_all = load_dataset(name, cfg)
             break
         except Exception as e:  # noqa: BLE001
             last_err = e
-            logging.warning("Failed to load dataset '%s': %s", name, e)
+            logging.warning("Failed to load dataset '%s': %s", tag, e)
             continue
 
     if ds_all is None:
