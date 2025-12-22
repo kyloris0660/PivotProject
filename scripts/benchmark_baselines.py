@@ -155,8 +155,6 @@ def build_hnsw_index(
     ef_search: int,
     index_path: Path,
 ) -> Tuple[hnswlib.Index, float, int]:
-        id_to_index = {img_id: idx for idx, img_id in enumerate(image_ids)}
-        gt_indices = np.array([id_to_index[g] for g in gt_ids], dtype=int)
     ensure_dir(index_path.parent)
     index = hnswlib.Index(space=space, dim=data.shape[1])
     t0 = time.perf_counter()
@@ -185,25 +183,18 @@ def hnsw_search(
 
 
 def hnsw_search_batch(
-            "CandRecall@topC": 1.0,
-            "cand_hit_rank_mean": -1.0,
-            "cand_hit_rank_median": -1.0,
     index: hnswlib.Index,
     queries: np.ndarray,
     topk: int,
     batch_q: int,
     warmup: int,
-        res_b = orig_hnsw_method(
-            caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
-        )
+) -> Tuple[np.ndarray, float]:
     labels_all: List[np.ndarray] = []
     timings: List[Tuple[float, int]] = []
     n_queries = queries.shape[0]
     warmup_queries = warmup
     for start in range(0, n_queries, batch_q):
-        res_c = pivot_hnsw_method(
-            caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
-        )
+        end = min(start + batch_q, n_queries)
         batch = queries[start:end]
         t0 = time.perf_counter()
         labels, _ = index.knn_query(batch, k=topk)
@@ -463,6 +454,8 @@ def main() -> None:
     )
     caption_embs_sample = caption_embs[sampled_idx]
     gt_ids = [pair[1] for pair in sampled_pairs]
+    id_to_index = {img_id: idx for idx, img_id in enumerate(image_ids)}
+    gt_indices = np.array([id_to_index[g] for g in gt_ids], dtype=int)
 
     results: List[Dict[str, float | int | str]] = []
 
@@ -491,13 +484,16 @@ def main() -> None:
         "M": 0,
         "pivot_norm": "none",
         "pivot_weight": "none",
+        "CandRecall@topC": 1.0,
+        "cand_hit_rank_mean": -1.0,
+        "cand_hit_rank_median": -1.0,
         **recalls_brute,
     }
     results.append(res_a)
 
     # Method B: HNSW on original embeddings
     res_b = orig_hnsw_method(
-        caption_embs_sample, image_embs, image_ids, base_config, args
+        caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
     )
     recalls_b = compute_recalls(res_b.pop("preds"), gt_ids)
     res_b.update(recalls_b)
@@ -505,7 +501,7 @@ def main() -> None:
 
     # Method C: Pivot + HNSW
     res_c = pivot_hnsw_method(
-        caption_embs_sample, image_embs, image_ids, base_config, args
+        caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
     )
     recalls_c = compute_recalls(res_c.pop("preds"), gt_ids)
     res_c.update(recalls_c)
