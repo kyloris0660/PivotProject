@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -114,16 +115,30 @@ def _download_file(url: str, dest: Path, desc: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         return
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        with dest.open("wb") as f, tqdm(
-            total=total, unit="B", unit_scale=True, desc=desc
-        ) as bar:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    bar.update(len(chunk))
+
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            with requests.get(url, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                with dest.open("wb") as f, tqdm(
+                    total=total, unit="B", unit_scale=True, desc=desc
+                ) as bar:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            bar.update(len(chunk))
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            wait = 2**attempt
+            logging.warning(
+                "Download failed (%s), retry %d/3 in %ds", desc, attempt + 1, wait
+            )
+            time.sleep(wait)
+
+    raise RuntimeError(f"Failed to download {url}: {last_exc}") from last_exc
 
 
 def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict]:
@@ -131,7 +146,7 @@ def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict
     ann_dir.mkdir(parents=True, exist_ok=True)
     ann_zip = ann_dir / "annotations_trainval2017.zip"
     if not ann_zip.exists():
-        url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+        url = "https://images.cocodataset.org/annotations/annotations_trainval2017.zip"
         _download_file(url, ann_zip, desc="download_annotations")
         import zipfile
 
@@ -166,7 +181,7 @@ def _ensure_coco_image(cache_root: Path, split_dir: str, file_name: str) -> Path
     dest = split_path / file_name
     if dest.exists():
         return dest
-    base_url = f"http://images.cocodataset.org/{split_dir}/{file_name}"
+    base_url = f"https://images.cocodataset.org/{split_dir}/{file_name}"
     _download_file(base_url, dest, desc=f"{split_dir}_{file_name}")
     return dest
 
@@ -248,6 +263,32 @@ def load_coco_captions(config: RetrievalConfig) -> List[Dict]:
         )
         return load_coco_captions_fallback(config)
 
+    available_splits = sorted(ds_all.keys())
+    if config.split not in ds_all:
+        raise ValueError(
+            f"Split '{config.split}' not found for coco_captions. Available splits: {available_splits}"
+        )
+
+    ds = ds_all[config.split]
+    records: List[Dict] = []
+    max_items = config.max_images if config.max_images is not None else len(ds)
+    for idx, item in tqdm(enumerate(ds), total=min(len(ds), max_items), desc="dataset"):
+        if idx >= max_items:
+            break
+        captions = _extract_captions(item)
+        image = _extract_image(item)
+        image_id = _extract_image_id(item, idx)
+        records.append(
+            {
+                "image_id": image_id,
+                "image": image,
+                "captions": captions,
+                "split": config.split,
+            }
+        )
+    logging.info("Loaded %d images", len(records))
+    return records
+
 
 def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
     split_map = {
@@ -308,32 +349,6 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
         )
 
     logging.info("Loaded %d images via COCO fallback", len(records))
-    return records
-
-    available_splits = sorted(ds_all.keys())
-    if config.split not in ds_all:
-        raise ValueError(
-            f"Split '{config.split}' not found for coco_captions. Available splits: {available_splits}"
-        )
-
-    ds = ds_all[config.split]
-    records: List[Dict] = []
-    max_items = config.max_images if config.max_images is not None else len(ds)
-    for idx, item in tqdm(enumerate(ds), total=min(len(ds), max_items), desc="dataset"):
-        if idx >= max_items:
-            break
-        captions = _extract_captions(item)
-        image = _extract_image(item)
-        image_id = _extract_image_id(item, idx)
-        records.append(
-            {
-                "image_id": image_id,
-                "image": image,
-                "captions": captions,
-                "split": config.split,
-            }
-        )
-    logging.info("Loaded %d images", len(records))
     return records
 
 
