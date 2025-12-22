@@ -77,7 +77,14 @@ def load_or_compute_image_embeddings(
 
     if emb_path.exists() and ids_path.exists() and not config.force_recompute:
         logging.info("Loading cached image embeddings from %s", emb_path)
-        return np.load(emb_path), load_json(ids_path)
+        embs = np.load(emb_path)
+        ids = load_json(ids_path)
+        if embs.shape[0] == len(records) and len(ids) == len(records):
+            return embs, ids
+        logging.info(
+            "Cached image embeddings length %d does not match requested records %d; recomputing",
+            embs.shape[0], len(records),
+        )
 
     logging.info("Computing image embeddings for %d images", len(records))
     imgs = [rec["image"] for rec in records]
@@ -114,7 +121,13 @@ def load_or_compute_caption_embeddings(
 
     if emb_path.exists() and mapping_path.exists() and not config.force_recompute:
         logging.info("Loading cached caption embeddings from %s", emb_path)
-        return np.load(emb_path)
+        embs = np.load(emb_path)
+        if embs.shape[0] == len(pairs):
+            return embs
+        logging.info(
+            "Cached caption embeddings length %d does not match requested pairs %d; recomputing",
+            embs.shape[0], len(pairs),
+        )
 
     logging.info("Computing caption embeddings for %d captions", len(pairs))
     captions = [text for text, _ in pairs]
