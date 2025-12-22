@@ -50,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def run_one(config: RetrievalConfig, records, caption_pairs, image_embs, image_ids, caption_embs) -> Dict[str, float]:
+def run_one(
+    config: RetrievalConfig, records, caption_pairs, image_embs, image_ids, caption_embs
+) -> Dict[str, float]:
     pivots, _ = select_pivots(image_embs, config)
     pivot_coords = compute_pivot_coordinates(image_embs, pivots, config, config.split)
     hnsw_index, build_time = build_or_load_index(pivot_coords, config)
@@ -91,8 +93,12 @@ def main() -> None:
     records = load_flickr30k(base_config)
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
     model, processor = load_clip(base_config.model_name, base_config.device)
-    image_embs, image_ids = load_or_compute_image_embeddings(records, base_config, model, processor)
-    caption_embs = load_or_compute_caption_embeddings(caption_pairs, base_config, model, processor)
+    image_embs, image_ids = load_or_compute_image_embeddings(
+        records, base_config, model, processor
+    )
+    caption_embs = load_or_compute_caption_embeddings(
+        caption_pairs, base_config, model, processor
+    )
 
     grid: List[Tuple[int, int, int, int]] = []
     for m in args.ms:
@@ -109,7 +115,9 @@ def main() -> None:
         cfg.topC = topC
         cfg.ef_search = ef_s
         cfg.M = M
-        metrics = run_one(cfg, records, caption_pairs, image_embs, image_ids, caption_embs)
+        metrics = run_one(
+            cfg, records, caption_pairs, image_embs, image_ids, caption_embs
+        )
         row: Dict[str, float | int | str] = {
             **metrics,
             "m": m,
@@ -160,7 +168,9 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(6, 4))
     x = [float(r.get("avg_total_ms", 0)) for r in results_sorted]
     y = [float(r.get("Recall@10", 0)) for r in results_sorted]
-    labels = [f"m{r['m']}_C{r['topC']}_ef{r['efSearch']}_M{r['M']}" for r in results_sorted]
+    labels = [
+        f"m{r['m']}_C{r['topC']}_ef{r['efSearch']}_M{r['M']}" for r in results_sorted
+    ]
     ax.scatter(x, y, c="#4c72b0")
     for xi, yi, lbl in zip(x, y, labels):
         ax.text(xi, yi, lbl, fontsize=7)

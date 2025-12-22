@@ -30,6 +30,21 @@ python -m scripts.run_all --source hf --split test --m 8 --topC 500 --k 10 --dev
 ```
 Key flags: `--pivot_sample` (sampling for pivot selection), `--seed`, `--M`, `--efc`/`--efs`, `--force_recompute`, `--max_images`, `--max_captions`.
 
+## Benchmark baselines
+使用 `scripts/benchmark_baselines.py` 对同一批查询/图库公平对比三种方法：
+- A) brute-force（原空间精确点积）
+- B) 原空间 HNSW（cosine）
+- C) Pivot+HNSW（pivot 低维 ANN → 原空间精排）
+
+示例（子集 2k 图 / 1 万 caption，默认 CLIP-B/32）：
+```bash
+python -m scripts.benchmark_baselines --device cuda \
+	--max_images 2000 --max_captions 10000 --n_queries 1000 \
+	--pivot_m 16 --topC 1200 --pivot_efSearch 128 --pivot_M 24 \
+	--orig_hnsw_efSearch 128 --orig_hnsw_M 24 --force_recompute
+```
+输出：`results/benchmark_*.json`、`results/benchmark_*.csv`，以及 `plots/benchmark_latency_vs_recall_*.png`。每种方法记录 Recall@1/5/10、平均查询延迟（分拆 brute/hnsw/pivot_map/rerank）、索引构建时间、索引大小等。
+
 ## Caching Layout
 - Image embeddings: `cache/embeddings/images_{split}_{model}.npy`
 - Image IDs: `cache/embeddings/image_ids_{split}.json`
