@@ -197,8 +197,9 @@ def hnsw_search_batch(
         current_ef = index.get_ef()
     except AttributeError:
         current_ef = None
-    if current_ef is None or current_ef < topk:
-        index.set_ef(max(topk, current_ef or topk))
+    target_ef = max(topk * 2, current_ef or 0, topk)
+    if current_ef is None or current_ef < target_ef:
+        index.set_ef(target_ef)
 
     labels_all: List[np.ndarray] = []
     timings: List[Tuple[float, int]] = []
