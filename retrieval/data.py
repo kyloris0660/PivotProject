@@ -134,9 +134,8 @@ def _download_file(url: str, dest: Path, desc: str) -> None:
             return
         except requests.exceptions.SSLError as exc:  # type: ignore[attr-defined]
             last_exc = exc
-            if (
-                not tried_http
-                and current_url.startswith("https://images.cocodataset.org/")
+            if not tried_http and current_url.startswith(
+                "https://images.cocodataset.org/"
             ):
                 logging.warning(
                     "SSL failed for %s (%s); retrying over http", current_url, exc
@@ -174,7 +173,8 @@ def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict
     ann_dir.mkdir(parents=True, exist_ok=True)
     ann_zip = ann_dir / "annotations_trainval2017.zip"
     if not ann_zip.exists():
-        url = "https://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+        # Use http to avoid occasional SSL hostname mismatch errors in some Colab environments
+        url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
         _download_file(url, ann_zip, desc="download_annotations")
         import zipfile
 
@@ -209,7 +209,8 @@ def _ensure_coco_image(cache_root: Path, split_dir: str, file_name: str) -> Path
     dest = split_path / file_name
     if dest.exists():
         return dest
-    base_url = f"https://images.cocodataset.org/{split_dir}/{file_name}"
+    # Use http to avoid SSL hostname mismatch in some Colab environments
+    base_url = f"http://images.cocodataset.org/{split_dir}/{file_name}"
     _download_file(base_url, dest, desc=f"{split_dir}_{file_name}")
     return dest
 
