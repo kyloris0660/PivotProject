@@ -19,6 +19,10 @@ DATASET_REGISTRY = {
         ("coco_captions", None),
         ("HuggingFaceM4/coco_captions", None),
     ],
+    # widely available web-caption dataset with train/validation
+    "conceptual_captions": [
+        ("conceptual_captions", None),
+    ],
 }
 
 
@@ -193,6 +197,60 @@ def load_coco_captions(config: RetrievalConfig) -> List[Dict]:
     return records
 
 
+def load_conceptual_captions(config: RetrievalConfig) -> List[Dict]:
+    logging.info(
+        "Loading Conceptual Captions from Hugging Face: split=%s", config.split
+    )
+
+    tried: List[str] = []
+    last_err: Exception | None = None
+    ds_all = None
+    for name, cfg in DATASET_REGISTRY["conceptual_captions"]:
+        tag = name if cfg is None else f"{name}:{cfg}"
+        tried.append(tag)
+        try:
+            if cfg is None:
+                ds_all = load_dataset(name)
+            else:
+                ds_all = load_dataset(name, cfg)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logging.warning("Failed to load dataset '%s': %s", tag, e)
+            continue
+
+    if ds_all is None:
+        raise RuntimeError(
+            f"Unable to load conceptual_captions dataset. Tried: {tried}. Last error: {last_err}"
+        )
+
+    available_splits = sorted(ds_all.keys())
+    if config.split not in ds_all:
+        raise ValueError(
+            f"Split '{config.split}' not found for conceptual_captions. Available splits: {available_splits}"
+        )
+
+    ds = ds_all[config.split]
+    records: List[Dict] = []
+    max_items = config.max_images if config.max_images is not None else len(ds)
+    for idx, item in tqdm(enumerate(ds), total=min(len(ds), max_items), desc="dataset"):
+        if idx >= max_items:
+            break
+        captions = _extract_captions(item)
+        image = _extract_image(item)
+        image_id = _extract_image_id(item, idx)
+        records.append(
+            {
+                "image_id": image_id,
+                "image": image,
+                "captions": captions,
+                "split": config.split,
+            }
+        )
+    logging.info("Loaded %d images", len(records))
+    return records
+
+
 def build_caption_pairs(
     records: List[Dict], max_captions: int | None = None
 ) -> List[Tuple[str, str]]:
@@ -210,6 +268,8 @@ def load_dataset_records(config: RetrievalConfig) -> List[Dict]:
         return load_flickr30k(config)
     if config.dataset == "coco_captions":
         return load_coco_captions(config)
+    if config.dataset == "conceptual_captions":
+        return load_conceptual_captions(config)
     raise ValueError(
         f"Unknown dataset '{config.dataset}'. Supported: {list(DATASET_REGISTRY.keys())}"
     )
