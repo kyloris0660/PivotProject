@@ -1,0 +1,51 @@
+# Pivot-Based Coordinate Reduction + HNSW on Flickr30k
+
+This project implements the core method of **Pivot-Based Coordinate Reduction and Hierarchical Indexing for High-Dimensional Image Retrieval**. The goal is to make text-to-image retrieval efficient by first mapping high-dimensional embeddings (e.g., CLIP 512-d) into a low-dimensional pivot-distance coordinate space, building an ANN index there, and then re-ranking in the original space to recover accuracy.
+
+## Problem Definition
+- Directly indexing high-dimensional embeddings is costly.
+- We select `m` pivots (farthest-point sampling) from image embeddings.
+- Each vector `x` is mapped to pivot space via $T(x) = [d(x,p_1), ..., d(x,p_m)]$ with cosine distance `d(x,p)=1 - x·p` (embeddings are L2-normalized so cosine is dot product).
+- ANN (HNSW, `space='l2'`) runs in pivot space to retrieve a candidate pool, then exact re-ranking is done in the original embedding space to produce final top-k results.
+
+## Dataset
+- Default source: `load_dataset("nlphuji/flickr30k")`.
+- Robust to caption field names (`caption` or `captions` list) and uses `image` (PIL.Image). Each sample is normalized to `{image_id, image, captions, split}`.
+- Evaluation flattens captions into `(caption_text, gt_image_id)` pairs.
+
+## Pipeline (matches the research logic)
+1. **Load data** (Flickr30k test split by default).
+2. **Embed images/text** with CLIP; cache to `cache/embeddings/`.
+3. **Select pivots** via farthest-point sampling (cosine distance) with fixed seed; cache to `cache/pivots/`.
+4. **Project to pivot space**: compute `1 - dot` to pivots; cache pivot coordinates.
+5. **Build/load HNSW** in pivot space (L2) from `cache/index/`.
+6. **Query**: map caption embedding to pivot space, get topC candidates from HNSW, rerank in original space by cosine similarity, output top-k.
+7. **Report metrics**: Recall@{1,5,10}, avg latency components, build time; save JSON+CSV to `results/` and a simple plot to `plots/`.
+
+## Quick Start
+```bash
+# From project root
+python -m pip install -r requirements.txt
+python -m scripts.run_all --source hf --split test --m 8 --topC 500 --k 10 --device cuda
+```
+Key flags: `--pivot_sample` (sampling for pivot selection), `--seed`, `--M`, `--efc`/`--efs`, `--force_recompute`, `--max_images`, `--max_captions`.
+
+## Caching Layout
+- Image embeddings: `cache/embeddings/images_{split}_{model}.npy`
+- Image IDs: `cache/embeddings/image_ids_{split}.json`
+- Caption embeddings: `cache/embeddings/captions_{split}_{model}.npy`
+- Caption→image mapping: `cache/embeddings/caption_to_image_{split}.json`
+- Pivots: `cache/pivots/pivots_m{m}_seed{seed}.npy` (+ meta JSON)
+- Pivot coords (images): `cache/pivots/pivot_coords_images_{split}_m{m}.npy`
+- HNSW index: `cache/index/hnsw_{split}_m{m}_M{M}_efc{efc}.bin` (+ meta)
+- Results: `results/exp_YYYYmmdd_HHMM.(json|csv)`; plots in `plots/`.
+
+## Output
+Console summary includes recalls and latency. Files record:
+- `Recall@1/5/10`, `avg_hnsw_ms`, `avg_rerank_ms`, `avg_total_ms`, `build_index_time_sec`.
+- Parameters: `m, topC, k, model_name, M, efConstruction, efSearch, seed, device`.
+
+## Notes
+- All randomness (pivot start, sampling) is controlled by `--seed`.
+- Pivot distance computation uses cosine distance on normalized embeddings.
+- Clear error messages will be raised if dataset fields are missing; adjust field names or preprocess accordingly.

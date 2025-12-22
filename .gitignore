@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.env
+.venv
+.cache/
+.cache
+cache/
+results/
+plots/
+.ipynb_checkpoints/
+.idea/
+.vscode/
