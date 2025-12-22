@@ -328,6 +328,7 @@ def orig_hnsw_method(
         ef_search=cfg.ef_search,
         num_threads=args.num_threads,
     )
+    labels = labels.astype(np.int64, copy=False)
     rerank_device = args.rerank_device
     if rerank_device == "auto":
         rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -350,7 +351,7 @@ def orig_hnsw_method(
         q_batch = caption_embs[start:end]
         t1 = time.perf_counter()
         if rerank_device == "cuda":
-            lab_tensor = torch.as_tensor(lab_batch, device="cuda")
+            lab_tensor = torch.as_tensor(lab_batch, device="cuda", dtype=torch.long)
             q_tensor = torch.as_tensor(q_batch, device="cuda")
             cand_emb = image_embs_torch[lab_tensor]
             scores = torch.einsum("bkd,bd->bk", cand_emb, q_tensor)
