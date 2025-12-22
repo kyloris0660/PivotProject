@@ -34,7 +34,18 @@ def _extract_image_id(record: Dict, idx: int) -> str:
 
 def load_flickr30k(config: RetrievalConfig) -> List[Dict]:
     logging.info("Loading Flickr30k from Hugging Face: split=%s", config.split)
-    ds = load_dataset("nlphuji/flickr30k", split=config.split)
+    try:
+        ds = load_dataset(
+            "nlphuji/flickr30k",
+            split=config.split,
+            trust_remote_code=True,
+        )
+    except RuntimeError as e:
+        msg = (
+            "Failed to load dataset nlphuji/flickr30k. If you see 'Dataset scripts are no longer supported', "
+            "update datasets to >=2.19 and pass trust_remote_code=True, or clear local cache for flickr30k."
+        )
+        raise RuntimeError(msg) from e
 
     records: List[Dict] = []
     max_items = config.max_images if config.max_images is not None else len(ds)
