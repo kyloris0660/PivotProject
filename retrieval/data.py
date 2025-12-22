@@ -17,8 +17,32 @@ def _extract_captions(record: Dict) -> List[str]:
         if caps:
             return caps
 
-    if "caption" in record and isinstance(record["caption"], str) and record["caption"].strip():
-        return [record["caption"]]
+    if "caption" in record:
+        cap_val = record["caption"]
+        if isinstance(cap_val, str) and cap_val.strip():
+            return [cap_val]
+        if isinstance(cap_val, list):
+            caps: List[str] = []
+            for s in cap_val:
+                if isinstance(s, str) and s.strip():
+                    caps.append(s)
+                elif isinstance(s, dict):
+                    if "raw" in s and isinstance(s["raw"], str) and s["raw"].strip():
+                        caps.append(s["raw"])
+                    elif (
+                        "sentence" in s
+                        and isinstance(s["sentence"], str)
+                        and s["sentence"].strip()
+                    ):
+                        caps.append(s["sentence"])
+                    elif "tokens" in s and isinstance(s["tokens"], list):
+                        joined = " ".join(
+                            str(tok) for tok in s["tokens"] if isinstance(tok, str)
+                        )
+                        if joined.strip():
+                            caps.append(joined)
+            if caps:
+                return caps
 
     if "sentences" in record and isinstance(record["sentences"], list):
         caps: List[str] = []
@@ -28,10 +52,16 @@ def _extract_captions(record: Dict) -> List[str]:
             elif isinstance(s, dict):
                 if "raw" in s and isinstance(s["raw"], str) and s["raw"].strip():
                     caps.append(s["raw"])
-                elif "sentence" in s and isinstance(s["sentence"], str) and s["sentence"].strip():
+                elif (
+                    "sentence" in s
+                    and isinstance(s["sentence"], str)
+                    and s["sentence"].strip()
+                ):
                     caps.append(s["sentence"])
                 elif "tokens" in s and isinstance(s["tokens"], list):
-                    joined = " ".join(str(tok) for tok in s["tokens"] if isinstance(tok, str))
+                    joined = " ".join(
+                        str(tok) for tok in s["tokens"] if isinstance(tok, str)
+                    )
                     if joined.strip():
                         caps.append(joined)
         if caps:
