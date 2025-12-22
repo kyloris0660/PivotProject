@@ -117,9 +117,11 @@ def _download_file(url: str, dest: Path, desc: str) -> None:
         return
 
     last_exc: Exception | None = None
+    current_url = url
+    tried_http = False
     for attempt in range(3):
         try:
-            with requests.get(url, stream=True, timeout=60) as r:
+            with requests.get(current_url, stream=True, timeout=60) as r:
                 r.raise_for_status()
                 total = int(r.headers.get("content-length", 0))
                 with dest.open("wb") as f, tqdm(
@@ -130,11 +132,37 @@ def _download_file(url: str, dest: Path, desc: str) -> None:
                             f.write(chunk)
                             bar.update(len(chunk))
             return
+        except requests.exceptions.SSLError as exc:  # type: ignore[attr-defined]
+            last_exc = exc
+            if (
+                not tried_http
+                and current_url.startswith("https://images.cocodataset.org/")
+            ):
+                logging.warning(
+                    "SSL failed for %s (%s); retrying over http", current_url, exc
+                )
+                current_url = current_url.replace("https://", "http://", 1)
+                tried_http = True
+                time.sleep(1)
+                continue
+            wait = 2**attempt
+            logging.warning(
+                "Download failed (%s) [%s], retry %d/3 in %ds",
+                desc,
+                exc,
+                attempt + 1,
+                wait,
+            )
+            time.sleep(wait)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             wait = 2**attempt
             logging.warning(
-                "Download failed (%s), retry %d/3 in %ds", desc, attempt + 1, wait
+                "Download failed (%s) [%s], retry %d/3 in %ds",
+                desc,
+                exc,
+                attempt + 1,
+                wait,
             )
             time.sleep(wait)
 
