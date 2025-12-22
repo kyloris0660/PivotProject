@@ -23,8 +23,8 @@ This project implements the core method of **Pivot-Based Coordinate Reduction an
 7. **Report metrics**: Recall@{1,5,10}, avg latency components, build time; save JSON+CSV to `results/` and a simple plot to `plots/`.
 
 ## Quick Start
+# From project root (datasets must be <3.0 for flickr30k script)
 ```bash
-# From project root
 python -m pip install -r requirements.txt
 python -m scripts.run_all --source hf --split test --m 8 --topC 500 --k 10 --device cuda
 ```

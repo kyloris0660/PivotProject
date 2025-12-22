@@ -1,7 +1,9 @@
 import logging
 from typing import Dict, List, Tuple
 
+import datasets
 from datasets import load_dataset
+from packaging import version
 from PIL import Image
 from tqdm import tqdm
 
@@ -34,16 +36,22 @@ def _extract_image_id(record: Dict, idx: int) -> str:
 
 def load_flickr30k(config: RetrievalConfig) -> List[Dict]:
     logging.info("Loading Flickr30k from Hugging Face: split=%s", config.split)
+
+    if version.parse(datasets.__version__).major >= 3:
+        raise RuntimeError(
+            "datasets>=3.0 removes support for dataset scripts. Install datasets<3.0 (e.g., pip install 'datasets<3.0.0') "
+            "and clear any cached flickr30k artifacts under ~/.cache/huggingface/datasets."
+        )
+
     try:
         ds = load_dataset(
             "nlphuji/flickr30k",
             split=config.split,
-            trust_remote_code=True,
         )
     except RuntimeError as e:
         msg = (
-            "Failed to load dataset nlphuji/flickr30k. If you see 'Dataset scripts are no longer supported', "
-            "update datasets to >=2.19 and pass trust_remote_code=True, or clear local cache for flickr30k."
+            "Failed to load dataset nlphuji/flickr30k because dataset scripts are blocked. "
+            "Install datasets<3.0.0 (e.g., 2.19.x) and clear local cache for flickr30k under ~/.cache/huggingface/datasets."
         )
         raise RuntimeError(msg) from e
 
