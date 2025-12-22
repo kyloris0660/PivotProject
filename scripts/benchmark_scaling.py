@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--Ns", default="5000,10000,20000,50000,80000")
-    p.add_argument("--n_queries", type=int, default=1000)
+    p.add_argument("--n_queries", type=int, default=2000)
     p.add_argument("--max_captions", type=int, default=10000)
     p.add_argument("--k", type=int, default=10)
     p.add_argument("--pivot_m", type=int, default=16)
@@ -66,6 +66,11 @@ def parse_args() -> argparse.Namespace:
         choices=["cpu", "cuda", "auto"],
         default="auto",
         help="device for rerank; auto picks cuda if available",
+    )
+    p.add_argument(
+        "--allow_coco_train_download",
+        action="store_true",
+        help="Allow downloading large COCO train2017 images in fallback mode",
     )
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
@@ -99,6 +104,7 @@ def main() -> None:
         max_images=max_N,
         max_captions=args.max_captions,
         k=args.k,
+        allow_coco_train_download=args.allow_coco_train_download,
     )
 
     logging.info("Loading dataset and embeddings (max_images=%d)", max_N)

@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size_image", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--num_threads", type=int, default=4)
+    p.add_argument(
+        "--allow_coco_train_download",
+        action="store_true",
+        help="Allow downloading large COCO train2017 images in fallback mode",
+    )
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
     p.add_argument("--pivot_prune_to", type=int, default=0)
@@ -323,7 +328,57 @@ def orig_hnsw_method(
         ef_search=cfg.ef_search,
         num_threads=args.num_threads,
     )
-    preds = [[image_ids[j] for j in row[: cfg.k]] for row in labels]
+    rerank_device = args.rerank_device
+    if rerank_device == "auto":
+        rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
+    if rerank_device == "cuda" and not torch.cuda.is_available():
+        logging.warning(
+            "CUDA requested for rerank but not available; falling back to CPU"
+        )
+        rerank_device = "cpu"
+
+    preds: List[List[str]] = []
+    rerank_times: List[Tuple[float, int]] = []
+    image_embs_torch = None
+    if rerank_device == "cuda":
+        image_embs_torch = torch.as_tensor(image_embs, device="cuda").contiguous()
+
+    n_queries = caption_embs.shape[0]
+    for start in range(0, n_queries, args.batch_size_text):
+        end = min(start + args.batch_size_text, n_queries)
+        lab_batch = labels[start:end]
+        q_batch = caption_embs[start:end]
+        t1 = time.perf_counter()
+        if rerank_device == "cuda":
+            lab_tensor = torch.as_tensor(lab_batch, device="cuda")
+            q_tensor = torch.as_tensor(q_batch, device="cuda")
+            cand_emb = image_embs_torch[lab_tensor]
+            scores = torch.einsum("bkd,bd->bk", cand_emb, q_tensor)
+            k_eff = min(base_config.k, scores.shape[1])
+            _, topk_idx = torch.topk(scores, k=k_eff, dim=1)
+            rerank_times.append((time.perf_counter() - t1, q_batch.shape[0]))
+            topk_idx_cpu = topk_idx.cpu().numpy()
+            for row_sorted, lab_row in zip(topk_idx_cpu, lab_batch):
+                preds.append([image_ids[lab_row[i]] for i in row_sorted])
+        else:
+            cand_emb_batch = image_embs[lab_batch]
+            sims = np.einsum("bkd,bd->bk", cand_emb_batch, q_batch)
+            k_eff = min(base_config.k, sims.shape[1])
+            topk_idx_batch = np.argpartition(-sims, k_eff - 1, axis=1)[:, :k_eff]
+            topk_scores = np.take_along_axis(sims, topk_idx_batch, axis=1)
+            order = np.argsort(-topk_scores, axis=1)
+            sorted_idx = np.take_along_axis(topk_idx_batch, order, axis=1)
+            rerank_times.append((time.perf_counter() - t1, q_batch.shape[0]))
+            for row_sorted, lab_row in zip(sorted_idx, lab_batch):
+                preds.append([image_ids[lab_row[i]] for i in row_sorted])
+
+    if rerank_times:
+        total_time = sum(t for t, _ in rerank_times)
+        total_q = sum(b for _, b in rerank_times)
+        rerank_ms = (total_time / total_q) * 1000
+    else:
+        rerank_ms = 0.0
+
     cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
     hit_ranks = cand_ranks[cand_ranks >= 0]
     hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
@@ -334,7 +389,7 @@ def orig_hnsw_method(
         "avg_total_ms": hnsw_ms,
         "hnsw_ms": hnsw_ms,
         "pivot_map_ms": 0.0,
-        "rerank_ms": 0.0,
+        "rerank_ms": rerank_ms,
         "brute_force_ms": 0.0,
         "build_index_time_sec": build_time,
         "index_size_bytes": index_size,
@@ -346,7 +401,7 @@ def orig_hnsw_method(
         "pivot_weight": "none",
         "pivot_prune_to": 0,
         "prune_ms": 0.0,
-        "rerank_device": "cpu",
+        "rerank_device": rerank_device,
         "CandRecall@topC": cand_recall,
         "cand_hit_rank_mean": hit_rank_mean,
         "cand_hit_rank_median": hit_rank_median,
@@ -542,6 +597,7 @@ def main() -> None:
         max_images=args.max_images,
         max_captions=args.max_captions,
         k=args.k,
+        allow_coco_train_download=args.allow_coco_train_download,
     )
 
     logging.info("Loading dataset and embeddings")
@@ -549,16 +605,20 @@ def main() -> None:
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
 
     model, processor = load_clip(base_config.model_name, base_config.device)
+    t_embed_img = time.perf_counter()
     image_embs, image_ids = load_or_compute_image_embeddings(
         records, base_config, model, processor
     )
+    embed_time_img = time.perf_counter() - t_embed_img
     image_embs = ensure_float32_contig(image_embs)
 
     # For captions we want batch size text
     config_text = replace(base_config, batch_size=args.batch_size_text)
+    t_embed_cap = time.perf_counter()
     caption_embs = load_or_compute_caption_embeddings(
         caption_pairs, config_text, model, processor
     )
+    embed_time_cap = time.perf_counter() - t_embed_cap
     caption_embs = ensure_float32_contig(caption_embs)
 
     # Sample queries
@@ -637,6 +697,8 @@ def main() -> None:
                 "max_images": base_config.max_images,
                 "max_captions": base_config.max_captions,
                 "k": base_config.k,
+                "embedding_build_time_img_sec": embed_time_img,
+                "embedding_build_time_cap_sec": embed_time_cap,
             }
         )
 

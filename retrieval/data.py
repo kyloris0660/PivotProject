@@ -1,5 +1,7 @@
+import json
 import logging
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import datasets
@@ -108,6 +110,67 @@ def _extract_image(record: Dict) -> Image.Image:
     raise KeyError("Dataset record missing 'image' field (PIL.Image expected).")
 
 
+def _download_file(url: str, dest: Path, desc: str) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return
+    with requests.get(url, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        with dest.open("wb") as f, tqdm(
+            total=total, unit="B", unit_scale=True, desc=desc
+        ) as bar:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    bar.update(len(chunk))
+
+
+def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict]:
+    ann_dir = cache_root / "annotations"
+    ann_dir.mkdir(parents=True, exist_ok=True)
+    ann_zip = ann_dir / "annotations_trainval2017.zip"
+    if not ann_zip.exists():
+        url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+        _download_file(url, ann_zip, desc="download_annotations")
+        import zipfile
+
+        with zipfile.ZipFile(ann_zip, "r") as zf:
+            zf.extractall(ann_dir)
+
+    ann_map = {
+        "train2017": ann_dir / "annotations" / "captions_train2017.json",
+        "val2017": ann_dir / "annotations" / "captions_val2017.json",
+    }
+    if split_key not in ann_map:
+        raise ValueError(f"Unsupported COCO split '{split_key}' for annotations")
+
+    ann_path = ann_map[split_key]
+    if not ann_path.exists():
+        raise FileNotFoundError(f"Annotation file missing: {ann_path}")
+
+    with ann_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    images = {img["id"]: img for img in data.get("images", [])}
+    captions_by_image: Dict[int, List[str]] = {}
+    for ann in data.get("annotations", []):
+        img_id = ann["image_id"]
+        captions_by_image.setdefault(img_id, []).append(ann.get("caption", ""))
+    return images, captions_by_image
+
+
+def _ensure_coco_image(cache_root: Path, split_dir: str, file_name: str) -> Path:
+    split_path = cache_root / split_dir
+    split_path.mkdir(parents=True, exist_ok=True)
+    dest = split_path / file_name
+    if dest.exists():
+        return dest
+    base_url = f"http://images.cocodataset.org/{split_dir}/{file_name}"
+    _download_file(base_url, dest, desc=f"{split_dir}_{file_name}")
+    return dest
+
+
 def _extract_image_id(record: Dict, idx: int) -> str:
     candidates = ["image_id", "id", "filename"]
     for key in candidates:
@@ -178,9 +241,74 @@ def load_coco_captions(config: RetrievalConfig) -> List[Dict]:
             continue
 
     if ds_all is None:
-        raise RuntimeError(
-            f"Unable to load COCO captions dataset. Tried: {tried}. Last error: {last_err}"
+        logging.warning(
+            "HF COCO captions not available; falling back to official COCO download. Tried: %s; last error: %s",
+            tried,
+            last_err,
         )
+        return load_coco_captions_fallback(config)
+
+
+def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
+    split_map = {
+        "train": "train2017",
+        "training": "train2017",
+        "val": "val2017",
+        "validation": "val2017",
+    }
+    if config.split not in split_map:
+        raise ValueError(
+            f"Split '{config.split}' not supported for COCO fallback. Available splits: {list(split_map.keys())}"
+        )
+
+    split_key = split_map[config.split]
+    if split_key == "train2017" and not config.allow_coco_train_download:
+        raise RuntimeError(
+            "train2017 is large (~118k images, 18GB). Pass --allow_coco_train_download to enable downloading train images."
+        )
+
+    cache_root = config.cache_path("datasets", "coco2017")
+    images_meta, captions_by_image = _load_coco_annotations(cache_root, split_key)
+
+    all_image_ids = list(images_meta.keys())
+    max_images = (
+        config.max_images if config.max_images is not None else len(all_image_ids)
+    )
+    if split_key == "val2017":
+        max_images = min(max_images, 5000)  # val set size
+    selected_ids = all_image_ids[:max_images]
+    logging.info(
+        "COCO fallback using split=%s, images=%d", split_key, len(selected_ids)
+    )
+
+    records: List[Dict] = []
+    for img_id in tqdm(selected_ids, desc="dataset"):
+        meta = images_meta[img_id]
+        file_name = meta.get("file_name")
+        if not file_name:
+            continue
+        img_path = _ensure_coco_image(cache_root, split_key, file_name)
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("Failed to open image %s: %s", img_path, exc)
+            continue
+
+        caps = captions_by_image.get(img_id, [])
+        if not caps:
+            continue
+
+        records.append(
+            {
+                "image_id": str(img_id),
+                "image": image,
+                "captions": caps,
+                "split": config.split,
+            }
+        )
+
+    logging.info("Loaded %d images via COCO fallback", len(records))
+    return records
 
     available_splits = sorted(ds_all.keys())
     if config.split not in ds_all:

@@ -26,6 +26,7 @@ class RetrievalConfig:
     force_recompute: bool = False
     max_captions: Optional[int] = None
     max_images: Optional[int] = None
+    allow_coco_train_download: bool = False
 
     def cache_path(self, *parts: str) -> Path:
         return self.cache_dir.joinpath(*parts)
