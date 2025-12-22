@@ -191,13 +191,20 @@ def hnsw_search_batch(
     topk: int,
     batch_q: int,
     warmup: int,
+    ef_search: int,
 ) -> Tuple[np.ndarray, float]:
-    # Ensure ef >= topk to avoid hnswlib contiguous buffer errors when k is large.
+    # Clip topk to available elements to avoid contiguous buffer errors
+    current_count = index.get_current_count()
+    effective_topk = min(topk, current_count)
+    if effective_topk <= 0:
+        return np.empty((queries.shape[0], 0), dtype=int), 0.0
+
+    # Ensure ef >= requested search depth
     try:
         current_ef = index.get_ef()
     except AttributeError:
         current_ef = None
-    target_ef = max(topk * 2, current_ef or 0, topk)
+    target_ef = max(ef_search, effective_topk)
     if current_ef is None or current_ef < target_ef:
         index.set_ef(target_ef)
 
@@ -209,7 +216,7 @@ def hnsw_search_batch(
         end = min(start + batch_q, n_queries)
         batch = queries[start:end]
         t0 = time.perf_counter()
-        labels, _ = index.knn_query(batch, k=topk)
+        labels, _ = index.knn_query(batch, k=effective_topk)
         timings.append((time.perf_counter() - t0, batch.shape[0]))
         labels_all.append(labels)
     start_idx = (warmup_queries + batch_q - 1) // batch_q if warmup_queries > 0 else 0
@@ -283,6 +290,7 @@ def orig_hnsw_method(
         topk=cfg.k,
         batch_q=args.batch_size_text,
         warmup=args.warmup,
+        ef_search=cfg.ef_search,
     )
     preds = [[image_ids[j] for j in row] for row in labels]
     cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
@@ -365,6 +373,7 @@ def pivot_hnsw_method(
         topk=cfg.topC,
         batch_q=args.batch_size_text,
         warmup=args.warmup,
+        ef_search=cfg.ef_search,
     )
 
     cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
