@@ -12,7 +12,8 @@ from .config import RetrievalConfig
 
 DATASET_REGISTRY = {
     "flickr30k": "nlphuji/flickr30k",
-    "coco_captions": "HuggingFaceM4/coco_captions",
+    # coco captions variants on HF; we'll try these in order
+    "coco_captions": ["coco_captions", "HuggingFaceM4/coco_captions"],
 }
 
 
@@ -138,7 +139,24 @@ def load_flickr30k(config: RetrievalConfig) -> List[Dict]:
 def load_coco_captions(config: RetrievalConfig) -> List[Dict]:
     logging.info("Loading COCO Captions from Hugging Face: split=%s", config.split)
 
-    ds_all = load_dataset(DATASET_REGISTRY["coco_captions"])
+    tried: List[str] = []
+    last_err: Exception | None = None
+    ds_all = None
+    for name in DATASET_REGISTRY["coco_captions"]:
+        tried.append(name)
+        try:
+            ds_all = load_dataset(name)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logging.warning("Failed to load dataset '%s': %s", name, e)
+            continue
+
+    if ds_all is None:
+        raise RuntimeError(
+            f"Unable to load COCO captions dataset. Tried: {tried}. Last error: {last_err}"
+        )
+
     available_splits = sorted(ds_all.keys())
     if config.split not in ds_all:
         raise ValueError(
