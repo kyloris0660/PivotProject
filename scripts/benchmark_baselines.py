@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dataset",
         default="flickr30k",
-        choices=["flickr30k", "coco_captions"],
+        choices=["flickr30k", "coco_captions", "conceptual_captions"],
         help="dataset",
     )
     p.add_argument("--source", default="hf", choices=["hf"], help="data source")
