@@ -95,7 +95,10 @@ def compute_recalls(
     n = len(gt_ids)
     return {f"Recall@{k}": counts[k] / n for k in ks}
 
-def compute_candidate_hits(labels: np.ndarray, gt_indices: np.ndarray) -> Tuple[float, np.ndarray]:
+
+def compute_candidate_hits(
+    labels: np.ndarray, gt_indices: np.ndarray
+) -> Tuple[float, np.ndarray]:
     """Compute candidate recall and rank positions within candidate lists.
 
     labels: (Q, C) candidate indices; gt_indices: (Q,) ground-truth image indices.
@@ -189,6 +192,14 @@ def hnsw_search_batch(
     batch_q: int,
     warmup: int,
 ) -> Tuple[np.ndarray, float]:
+    # Ensure ef >= topk to avoid hnswlib contiguous buffer errors when k is large.
+    try:
+        current_ef = index.get_ef()
+    except AttributeError:
+        current_ef = None
+    if current_ef is None or current_ef < topk:
+        index.set_ef(max(topk, current_ef or topk))
+
     labels_all: List[np.ndarray] = []
     timings: List[Tuple[float, int]] = []
     n_queries = queries.shape[0]
