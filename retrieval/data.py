@@ -11,12 +11,36 @@ from .config import RetrievalConfig
 
 
 def _extract_captions(record: Dict) -> List[str]:
+    # Common HF variants: captions (list[str]), caption (str), sentences (list[dict|str]) with raw/sentence/tokens.
     if "captions" in record and isinstance(record["captions"], list):
-        return [c for c in record["captions"] if isinstance(c, str)]
-    if "caption" in record and isinstance(record["caption"], str):
+        caps = [c for c in record["captions"] if isinstance(c, str) and c.strip()]
+        if caps:
+            return caps
+
+    if "caption" in record and isinstance(record["caption"], str) and record["caption"].strip():
         return [record["caption"]]
+
+    if "sentences" in record and isinstance(record["sentences"], list):
+        caps: List[str] = []
+        for s in record["sentences"]:
+            if isinstance(s, str) and s.strip():
+                caps.append(s)
+            elif isinstance(s, dict):
+                if "raw" in s and isinstance(s["raw"], str) and s["raw"].strip():
+                    caps.append(s["raw"])
+                elif "sentence" in s and isinstance(s["sentence"], str) and s["sentence"].strip():
+                    caps.append(s["sentence"])
+                elif "tokens" in s and isinstance(s["tokens"], list):
+                    joined = " ".join(str(tok) for tok in s["tokens"] if isinstance(tok, str))
+                    if joined.strip():
+                        caps.append(joined)
+        if caps:
+            return caps
+
+    available = ", ".join(record.keys())
     raise KeyError(
-        "Dataset record missing caption(s). Expected 'captions' (List[str]) or 'caption' (str)."
+        "Dataset record missing caption(s). Expected fields like 'captions', 'caption', or 'sentences' with raw/sentence/tokens. "
+        f"Available keys: {available}"
     )
 
 
