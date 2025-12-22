@@ -45,6 +45,21 @@ python -m scripts.benchmark_baselines --device cuda \
 ```
 输出：`results/benchmark_*.json`、`results/benchmark_*.csv`，以及 `plots/benchmark_latency_vs_recall_*.png`。每种方法记录 Recall@1/5/10、平均查询延迟（分拆 brute/hnsw/pivot_map/rerank）、索引构建时间、索引大小等。
 
+可选 pivot 表达组合（`--pivot_norm`, `--pivot_weight`），建议跑四组：
+- `(none, none)`（基线）
+- `(zscore, none)`
+- `(none, variance)`
+- `(zscore, variance)`
+
+候选集指标：在 pivot+HNSW 中额外输出 `CandRecall@topC`（gt 是否出现在 topC 候选）和命中名次统计（mean/median，未命中为 -1），便于区分候选阶段 vs rerank 阶段的损失。
+
+扩展：新增 `scripts/benchmark_scaling.py` 跑规模曲线（默认 split=train，N=2000/5000/10000/20000/29000，n_queries=1000）：
+```bash
+python -m scripts.benchmark_scaling --device cuda --pivot_m 16 --topC 1200 \
+	--pivot_efSearch 128 --pivot_M 24 --orig_hnsw_efSearch 128 --orig_hnsw_M 24
+```
+输出：`results/scaling_*.csv|json`，以及 `plots/scaling_latency_vs_N_*.png`、`plots/scaling_R10_vs_N_*.png`（三条曲线：brute、orig HNSW、pivot+HNSW）。同一 N 内三种方法共享同一批 sampled queries（过滤掉不在前 N 图中的查询）。
+
 ## Caching Layout
 - Image embeddings: `cache/embeddings/images_{split}_{model}.npy`
 - Image IDs: `cache/embeddings/image_ids_{split}.json`
@@ -57,8 +72,8 @@ python -m scripts.benchmark_baselines --device cuda \
 
 ## Output
 Console summary includes recalls and latency. Files record:
-- `Recall@1/5/10`, `avg_hnsw_ms`, `avg_rerank_ms`, `avg_total_ms`, `build_index_time_sec`.
-- Parameters: `m, topC, k, model_name, M, efConstruction, efSearch, seed, device`.
+- `Recall@1/5/10`, `CandRecall@topC`, candidate hit rank (mean/median), `avg_hnsw_ms`, `avg_rerank_ms`, `avg_total_ms`, `build_index_time_sec`, `index_size_bytes`。
+- Parameters: `m, topC, k, model_name, M, efConstruction, efSearch, seed, device, pivot_norm, pivot_weight`。
 
 ## Notes
 - All randomness (pivot start, sampling) is controlled by `--seed`.

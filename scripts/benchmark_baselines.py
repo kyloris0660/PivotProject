@@ -95,6 +95,21 @@ def compute_recalls(
     n = len(gt_ids)
     return {f"Recall@{k}": counts[k] / n for k in ks}
 
+def compute_candidate_hits(labels: np.ndarray, gt_indices: np.ndarray) -> Tuple[float, np.ndarray]:
+    """Compute candidate recall and rank positions within candidate lists.
+
+    labels: (Q, C) candidate indices; gt_indices: (Q,) ground-truth image indices.
+    Returns (cand_recall, ranks) where ranks are 0-based positions or -1 if miss.
+    """
+    if labels.shape[0] != gt_indices.shape[0]:
+        raise ValueError("labels and gt_indices must have the same number of queries")
+
+    matches = labels == gt_indices[:, None]
+    hit_mask = matches.any(axis=1)
+    ranks = np.where(hit_mask, np.argmax(matches, axis=1), -1)
+    cand_recall = float(hit_mask.mean()) if hit_mask.size else 0.0
+    return cand_recall, ranks
+
 
 def brute_force_search(
     caption_embs: np.ndarray,
@@ -140,6 +155,8 @@ def build_hnsw_index(
     ef_search: int,
     index_path: Path,
 ) -> Tuple[hnswlib.Index, float, int]:
+        id_to_index = {img_id: idx for idx, img_id in enumerate(image_ids)}
+        gt_indices = np.array([id_to_index[g] for g in gt_ids], dtype=int)
     ensure_dir(index_path.parent)
     index = hnswlib.Index(space=space, dim=data.shape[1])
     t0 = time.perf_counter()
@@ -168,18 +185,25 @@ def hnsw_search(
 
 
 def hnsw_search_batch(
+            "CandRecall@topC": 1.0,
+            "cand_hit_rank_mean": -1.0,
+            "cand_hit_rank_median": -1.0,
     index: hnswlib.Index,
     queries: np.ndarray,
     topk: int,
     batch_q: int,
     warmup: int,
-) -> Tuple[np.ndarray, float]:
+        res_b = orig_hnsw_method(
+            caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
+        )
     labels_all: List[np.ndarray] = []
     timings: List[Tuple[float, int]] = []
     n_queries = queries.shape[0]
     warmup_queries = warmup
     for start in range(0, n_queries, batch_q):
-        end = min(start + batch_q, n_queries)
+        res_c = pivot_hnsw_method(
+            caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
+        )
         batch = queries[start:end]
         t0 = time.perf_counter()
         labels, _ = index.knn_query(batch, k=topk)
@@ -226,6 +250,7 @@ def orig_hnsw_method(
     caption_embs: np.ndarray,
     image_embs: np.ndarray,
     image_ids: List[str],
+    gt_indices: np.ndarray,
     base_config: RetrievalConfig,
     args: argparse.Namespace,
 ) -> Dict[str, float | int | str]:
@@ -257,6 +282,10 @@ def orig_hnsw_method(
         warmup=args.warmup,
     )
     preds = [[image_ids[j] for j in row] for row in labels]
+    cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
+    hit_ranks = cand_ranks[cand_ranks >= 0]
+    hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
+    hit_rank_median = float(np.median(hit_ranks)) if hit_ranks.size else -1.0
 
     result: Dict[str, float | int | str] = {
         "method": "orig_hnsw",
@@ -273,6 +302,9 @@ def orig_hnsw_method(
         "M": cfg.M,
         "pivot_norm": "none",
         "pivot_weight": "none",
+        "CandRecall@topC": cand_recall,
+        "cand_hit_rank_mean": hit_rank_mean,
+        "cand_hit_rank_median": hit_rank_median,
     }
     result["preds"] = preds
     return result
@@ -282,6 +314,7 @@ def pivot_hnsw_method(
     caption_embs: np.ndarray,
     image_embs: np.ndarray,
     image_ids: List[str],
+    gt_indices: np.ndarray,
     base_config: RetrievalConfig,
     args: argparse.Namespace,
 ) -> Dict[str, float | int | str]:
@@ -331,17 +364,38 @@ def pivot_hnsw_method(
         warmup=args.warmup,
     )
 
-    # Rerank in original space
-    rerank_times: List[float] = []
-    preds: List[List[str]] = []
-    for lab_row, qvec in zip(labels, caption_embs):
-        t1 = time.perf_counter()
-        sims = image_embs[lab_row] @ qvec
-        topk_idx = np.argsort(-sims)[: base_config.k]
-        rerank_times.append(time.perf_counter() - t1)
-        preds.append([image_ids[lab_row[i]] for i in topk_idx])
+    cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
+    hit_ranks = cand_ranks[cand_ranks >= 0]
+    hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
+    hit_rank_median = float(np.median(hit_ranks)) if hit_ranks.size else -1.0
 
-    rerank_ms = np.mean(rerank_times) * 1000 if rerank_times else 0.0
+    # Rerank in original space (batched + argpartition for equivalence)
+    rerank_times: List[Tuple[float, int]] = []  # (seconds, batch_size)
+    preds: List[List[str]] = []
+    n_queries = caption_embs.shape[0]
+    for start in range(0, n_queries, args.batch_size_text):
+        end = min(start + args.batch_size_text, n_queries)
+        lab_batch = labels[start:end]
+        q_batch = caption_embs[start:end]
+        t1 = time.perf_counter()
+        cand_emb_batch = image_embs[lab_batch]  # (B, topC, D)
+        sims = np.einsum("bkd,bd->bk", cand_emb_batch, q_batch)
+        topk_idx_batch = np.argpartition(-sims, base_config.k - 1, axis=1)[
+            :, : base_config.k
+        ]
+        topk_scores = np.take_along_axis(sims, topk_idx_batch, axis=1)
+        order = np.argsort(-topk_scores, axis=1)
+        sorted_idx = np.take_along_axis(topk_idx_batch, order, axis=1)
+        rerank_times.append((time.perf_counter() - t1, q_batch.shape[0]))
+        for row_sorted, lab_row in zip(sorted_idx, lab_batch):
+            preds.append([image_ids[lab_row[i]] for i in row_sorted])
+
+    if rerank_times:
+        total_time = sum(t for t, _ in rerank_times)
+        total_q = sum(b for _, b in rerank_times)
+        rerank_ms = (total_time / total_q) * 1000
+    else:
+        rerank_ms = 0.0
 
     result: Dict[str, float | int | str] = {
         "method": "pivot_hnsw",
@@ -358,6 +412,9 @@ def pivot_hnsw_method(
         "M": cfg.M,
         "pivot_norm": args.pivot_norm,
         "pivot_weight": args.pivot_weight,
+        "CandRecall@topC": cand_recall,
+        "cand_hit_rank_mean": hit_rank_mean,
+        "cand_hit_rank_median": hit_rank_median,
     }
     # recalls filled by caller
     result["preds"] = preds  # temporary; stripped later
