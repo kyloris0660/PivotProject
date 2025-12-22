@@ -27,8 +27,9 @@ def select_pivots(
     config: RetrievalConfig,
 ) -> Tuple[np.ndarray, np.ndarray]:
     pivot_dir = _pivot_dir(config)
-    pivot_path = pivot_dir / f"pivots_m{config.m}_seed{config.seed}.npy"
-    pivot_meta = pivot_dir / f"pivots_m{config.m}_seed{config.seed}.json"
+    subset_tag = f"_n{embeddings.shape[0]}" if config.max_images is not None else ""
+    pivot_path = pivot_dir / f"pivots_m{config.m}_seed{config.seed}{subset_tag}.npy"
+    pivot_meta = pivot_dir / f"pivots_m{config.m}_seed{config.seed}{subset_tag}.json"
 
     if pivot_path.exists() and pivot_meta.exists() and not config.force_recompute:
         logging.info("Loading pivots from %s", pivot_path)
@@ -70,7 +71,8 @@ def compute_pivot_coordinates(
     embeddings: np.ndarray, pivots: np.ndarray, config: RetrievalConfig, split: str
 ) -> np.ndarray:
     pivot_dir = _pivot_dir(config)
-    coord_path = pivot_dir / f"pivot_coords_images_{split}_m{config.m}.npy"
+    subset_tag = f"_n{embeddings.shape[0]}" if config.max_images is not None else ""
+    coord_path = pivot_dir / f"pivot_coords_images_{split}_m{config.m}{subset_tag}.npy"
     if coord_path.exists() and not config.force_recompute:
         logging.info("Loading pivot coordinates from %s", coord_path)
         return np.load(coord_path)

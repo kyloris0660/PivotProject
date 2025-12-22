@@ -20,13 +20,14 @@ def build_or_load_index(
     data: np.ndarray, config: RetrievalConfig, space: str = "l2"
 ) -> Tuple[hnswlib.Index, float]:
     idx_dir = _index_dir(config)
+    subset_tag = f"_n{data.shape[0]}" if config.max_images is not None else ""
     index_path = (
         idx_dir
-        / f"hnsw_{config.split}_m{config.m}_M{config.M}_efc{config.ef_construction}.bin"
+        / f"hnsw_{config.split}_m{config.m}_M{config.M}_efc{config.ef_construction}{subset_tag}.bin"
     )
     meta_path = (
         idx_dir
-        / f"hnsw_{config.split}_m{config.m}_M{config.M}_efc{config.ef_construction}.meta.json"
+        / f"hnsw_{config.split}_m{config.m}_M{config.M}_efc{config.ef_construction}{subset_tag}.meta.json"
     )
 
     if index_path.exists() and meta_path.exists() and not config.force_recompute:
