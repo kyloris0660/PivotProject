@@ -22,9 +22,10 @@ from typing import Dict, List, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import hnswlib
+import torch
 
 from retrieval.config import RetrievalConfig
-from retrieval.data import build_caption_pairs, load_flickr30k
+from retrieval.data import build_caption_pairs, load_dataset_records
 from retrieval.embeddings import (
     load_clip,
     load_or_compute_caption_embeddings,
@@ -42,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Benchmark brute-force vs HNSW vs Pivot+HNSW"
     )
+    p.add_argument(
+        "--dataset",
+        default="flickr30k",
+        choices=["flickr30k", "coco_captions"],
+        help="dataset",
+    )
     p.add_argument("--source", default="hf", choices=["hf"], help="data source")
     p.add_argument("--split", default="test")
     p.add_argument("--model_name", default="openai/clip-vit-base-patch32")
@@ -55,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--topC", type=int, default=1200)
     p.add_argument("--pivot_efSearch", type=int, default=128)
     p.add_argument("--pivot_M", type=int, default=24)
+    p.add_argument("--orig_topC", type=int, default=None)
     p.add_argument("--orig_hnsw_efSearch", type=int, default=128)
     p.add_argument("--orig_hnsw_M", type=int, default=24)
     p.add_argument("--pivot_norm", choices=["none", "zscore"], default="none")
@@ -62,8 +70,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size_text", type=int, default=64)
     p.add_argument("--batch_size_image", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--num_threads", type=int, default=4)
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
+    p.add_argument("--pivot_prune_to", type=int, default=0)
+    p.add_argument(
+        "--rerank_device",
+        choices=["cpu", "cuda", "auto"],
+        default="auto",
+        help="device for rerank; auto picks cuda if available",
+    )
     p.add_argument("--force_recompute", action="store_true")
     p.add_argument(
         "--warmup", type=int, default=10, help="warmup queries before timing"
@@ -112,6 +128,13 @@ def compute_candidate_hits(
     ranks = np.where(hit_mask, np.argmax(matches, axis=1), -1)
     cand_recall = float(hit_mask.mean()) if hit_mask.size else 0.0
     return cand_recall, ranks
+
+
+def ensure_float32_contig(arr: np.ndarray) -> np.ndarray:
+    # Ensure downstream math uses contiguous float32 buffers
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32, copy=False)
+    return np.ascontiguousarray(arr)
 
 
 def brute_force_search(
@@ -192,6 +215,7 @@ def hnsw_search_batch(
     batch_q: int,
     warmup: int,
     ef_search: int,
+    num_threads: int | None = None,
 ) -> Tuple[np.ndarray, float]:
     # Clip topk to available elements to avoid contiguous buffer errors
     current_count = index.get_current_count()
@@ -200,13 +224,14 @@ def hnsw_search_batch(
         return np.empty((queries.shape[0], 0), dtype=int), 0.0
 
     # Ensure ef >= requested search depth
-    try:
-        current_ef = index.get_ef()
-    except AttributeError:
-        current_ef = None
     target_ef = max(ef_search, effective_topk)
-    if current_ef is None or current_ef < target_ef:
+    try:
         index.set_ef(target_ef)
+    except AttributeError:
+        pass
+
+    if num_threads is not None and num_threads > 0:
+        index.set_num_threads(num_threads)
 
     labels_all: List[np.ndarray] = []
     timings: List[Tuple[float, int]] = []
@@ -271,6 +296,9 @@ def orig_hnsw_method(
         force_recompute=args.force_recompute,
     )
 
+    image_embs = ensure_float32_contig(image_embs)
+    caption_embs = ensure_float32_contig(caption_embs)
+
     subset_tag = f"_n{image_embs.shape[0]}" if cfg.max_images is not None else ""
     index_path = cfg.cache_path("index") / (
         f"benchmark_orig_hnsw_{cfg.split}_M{cfg.M}_efc{cfg.ef_construction}_efs{cfg.ef_search}{subset_tag}.bin"
@@ -284,15 +312,18 @@ def orig_hnsw_method(
         index_path=index_path,
     )
 
+    search_topk = max(cfg.k, args.orig_topC) if args.orig_topC is not None else cfg.k
+
     labels, hnsw_ms = hnsw_search_batch(
         index,
         caption_embs,
-        topk=cfg.k,
+        topk=search_topk,
         batch_q=args.batch_size_text,
         warmup=args.warmup,
         ef_search=cfg.ef_search,
+        num_threads=args.num_threads,
     )
-    preds = [[image_ids[j] for j in row] for row in labels]
+    preds = [[image_ids[j] for j in row[: cfg.k]] for row in labels]
     cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
     hit_ranks = cand_ranks[cand_ranks >= 0]
     hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
@@ -308,11 +339,14 @@ def orig_hnsw_method(
         "build_index_time_sec": build_time,
         "index_size_bytes": index_size,
         "m": 0,
-        "topC": cfg.k,
+        "topC": search_topk,
         "efSearch": cfg.ef_search,
         "M": cfg.M,
         "pivot_norm": "none",
         "pivot_weight": "none",
+        "pivot_prune_to": 0,
+        "prune_ms": 0.0,
+        "rerank_device": "cpu",
         "CandRecall@topC": cand_recall,
         "cand_hit_rank_mean": hit_rank_mean,
         "cand_hit_rank_median": hit_rank_median,
@@ -338,13 +372,18 @@ def pivot_hnsw_method(
         M=args.pivot_M,
         force_recompute=args.force_recompute,
     )
+    image_embs = ensure_float32_contig(image_embs)
+    caption_embs = ensure_float32_contig(caption_embs)
 
     pivots, _ = select_pivots(image_embs, cfg)
+    pivots = ensure_float32_contig(pivots)
     pivot_coords = compute_pivot_coordinates(image_embs, pivots, cfg, cfg.split)
+    pivot_coords = ensure_float32_contig(pivot_coords)
 
     pivot_coords, stats = apply_pivot_transform(
         pivot_coords, args.pivot_norm, args.pivot_weight, None
     )
+    pivot_coords = ensure_float32_contig(pivot_coords)
 
     index_path = cfg.cache_path("index") / (
         f"benchmark_pivot_hnsw_{cfg.split}_m{cfg.m}_M{cfg.M}_efc{cfg.ef_construction}_efs{cfg.ef_search}_seed{cfg.seed}_n{image_embs.shape[0]}"
@@ -359,13 +398,18 @@ def pivot_hnsw_method(
         index_path=index_path,
     )
 
+    # Optional multithreading for search
+    if args.num_threads and args.num_threads > 0:
+        index.set_num_threads(args.num_threads)
+
     # Map queries to pivot space (with optional normalization/weight)
     t0 = time.perf_counter()
     pivot_queries = 1.0 - caption_embs @ pivots.T
+    pivot_map_ms = (time.perf_counter() - t0) * 1000 / caption_embs.shape[0]
     pivot_queries, _ = apply_pivot_transform(
         pivot_queries, args.pivot_norm, args.pivot_weight, stats
     )
-    pivot_map_ms = (time.perf_counter() - t0) * 1000 / caption_embs.shape[0]
+    pivot_queries = ensure_float32_contig(pivot_queries)
 
     labels, hnsw_ms = hnsw_search_batch(
         index,
@@ -374,6 +418,7 @@ def pivot_hnsw_method(
         batch_q=args.batch_size_text,
         warmup=args.warmup,
         ef_search=cfg.ef_search,
+        num_threads=args.num_threads,
     )
 
     cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
@@ -381,26 +426,67 @@ def pivot_hnsw_method(
     hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
     hit_rank_median = float(np.median(hit_ranks)) if hit_ranks.size else -1.0
 
-    # Rerank in original space (batched + argpartition for equivalence)
-    rerank_times: List[Tuple[float, int]] = []  # (seconds, batch_size)
+    prune_ms = 0.0
+    labels_for_rerank = labels
+    actual_prune_to = (
+        min(args.pivot_prune_to, labels.shape[1]) if args.pivot_prune_to > 0 else 0
+    )
+    if actual_prune_to > 0 and actual_prune_to < labels.shape[1]:
+        t_prune = time.perf_counter()
+        dists = np.sum((pivot_coords[labels] - pivot_queries[:, None, :]) ** 2, axis=2)
+        idx_keep = np.argpartition(dists, actual_prune_to - 1, axis=1)[
+            :, :actual_prune_to
+        ]
+        dist_keep = np.take_along_axis(dists, idx_keep, axis=1)
+        order_keep = np.argsort(dist_keep, axis=1)
+        sorted_keep = np.take_along_axis(idx_keep, order_keep, axis=1)
+        labels_for_rerank = np.take_along_axis(labels, sorted_keep, axis=1)
+        prune_ms = (time.perf_counter() - t_prune) * 1000 / labels.shape[0]
+
+    rerank_device = args.rerank_device
+    if rerank_device == "auto":
+        rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
+    if rerank_device == "cuda" and not torch.cuda.is_available():
+        logging.warning(
+            "CUDA requested for rerank but not available; falling back to CPU"
+        )
+        rerank_device = "cpu"
+
     preds: List[List[str]] = []
+    rerank_times: List[Tuple[float, int]] = []
     n_queries = caption_embs.shape[0]
+
+    image_embs_torch = None
+    if rerank_device == "cuda":
+        image_embs_torch = torch.as_tensor(image_embs, device="cuda").contiguous()
+
     for start in range(0, n_queries, args.batch_size_text):
         end = min(start + args.batch_size_text, n_queries)
-        lab_batch = labels[start:end]
+        lab_batch = labels_for_rerank[start:end]
         q_batch = caption_embs[start:end]
         t1 = time.perf_counter()
-        cand_emb_batch = image_embs[lab_batch]  # (B, topC, D)
-        sims = np.einsum("bkd,bd->bk", cand_emb_batch, q_batch)
-        topk_idx_batch = np.argpartition(-sims, base_config.k - 1, axis=1)[
-            :, : base_config.k
-        ]
-        topk_scores = np.take_along_axis(sims, topk_idx_batch, axis=1)
-        order = np.argsort(-topk_scores, axis=1)
-        sorted_idx = np.take_along_axis(topk_idx_batch, order, axis=1)
-        rerank_times.append((time.perf_counter() - t1, q_batch.shape[0]))
-        for row_sorted, lab_row in zip(sorted_idx, lab_batch):
-            preds.append([image_ids[lab_row[i]] for i in row_sorted])
+        if rerank_device == "cuda":
+            lab_tensor = torch.as_tensor(lab_batch, device="cuda")
+            q_tensor = torch.as_tensor(q_batch, device="cuda")
+            cand_emb = image_embs_torch[lab_tensor]
+            scores = torch.einsum("bkd,bd->bk", cand_emb, q_tensor)
+            k_eff = min(base_config.k, scores.shape[1])
+            _, topk_idx = torch.topk(scores, k=k_eff, dim=1)
+            rerank_times.append((time.perf_counter() - t1, q_batch.shape[0]))
+            topk_idx_cpu = topk_idx.cpu().numpy()
+            for row_sorted, lab_row in zip(topk_idx_cpu, lab_batch):
+                preds.append([image_ids[lab_row[i]] for i in row_sorted])
+        else:
+            cand_emb_batch = image_embs[lab_batch]
+            sims = np.einsum("bkd,bd->bk", cand_emb_batch, q_batch)
+            k_eff = min(base_config.k, sims.shape[1])
+            topk_idx_batch = np.argpartition(-sims, k_eff - 1, axis=1)[:, :k_eff]
+            topk_scores = np.take_along_axis(sims, topk_idx_batch, axis=1)
+            order = np.argsort(-topk_scores, axis=1)
+            sorted_idx = np.take_along_axis(topk_idx_batch, order, axis=1)
+            rerank_times.append((time.perf_counter() - t1, q_batch.shape[0]))
+            for row_sorted, lab_row in zip(sorted_idx, lab_batch):
+                preds.append([image_ids[lab_row[i]] for i in row_sorted])
 
     if rerank_times:
         total_time = sum(t for t, _ in rerank_times)
@@ -424,6 +510,9 @@ def pivot_hnsw_method(
         "M": cfg.M,
         "pivot_norm": args.pivot_norm,
         "pivot_weight": args.pivot_weight,
+        "pivot_prune_to": actual_prune_to,
+        "prune_ms": prune_ms,
+        "rerank_device": rerank_device,
         "CandRecall@topC": cand_recall,
         "cand_hit_rank_mean": hit_rank_mean,
         "cand_hit_rank_median": hit_rank_median,
@@ -439,6 +528,7 @@ def main() -> None:
     set_seed(args.seed)
 
     base_config = RetrievalConfig(
+        dataset=args.dataset,
         source=args.source,
         split=args.split,
         model_name=args.model_name,
@@ -455,19 +545,21 @@ def main() -> None:
     )
 
     logging.info("Loading dataset and embeddings")
-    records = load_flickr30k(base_config)
+    records = load_dataset_records(base_config)
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
 
     model, processor = load_clip(base_config.model_name, base_config.device)
     image_embs, image_ids = load_or_compute_image_embeddings(
         records, base_config, model, processor
     )
+    image_embs = ensure_float32_contig(image_embs)
 
     # For captions we want batch size text
     config_text = replace(base_config, batch_size=args.batch_size_text)
     caption_embs = load_or_compute_caption_embeddings(
         caption_pairs, config_text, model, processor
     )
+    caption_embs = ensure_float32_contig(caption_embs)
 
     # Sample queries
     sampled_pairs, sampled_idx = sample_queries(
@@ -505,6 +597,9 @@ def main() -> None:
         "M": 0,
         "pivot_norm": "none",
         "pivot_weight": "none",
+        "pivot_prune_to": 0,
+        "prune_ms": 0.0,
+        "rerank_device": "cpu",
         "CandRecall@topC": 1.0,
         "cand_hit_rank_mean": -1.0,
         "cand_hit_rank_median": -1.0,
@@ -537,6 +632,7 @@ def main() -> None:
                 "D": image_embs.shape[1],
                 "model_name": base_config.model_name,
                 "device": base_config.device,
+                "dataset": base_config.dataset,
                 "seed": base_config.seed,
                 "max_images": base_config.max_images,
                 "max_captions": base_config.max_captions,

@@ -10,6 +10,12 @@ from tqdm import tqdm
 from .config import RetrievalConfig
 
 
+DATASET_REGISTRY = {
+    "flickr30k": "nlphuji/flickr30k",
+    "coco_captions": "HuggingFaceM4/coco_captions",
+}
+
+
 def _extract_captions(record: Dict) -> List[str]:
     # Common HF variants: captions (list[str]), caption (str), sentences (list[dict|str]) with raw/sentence/tokens.
     if "captions" in record and isinstance(record["captions"], list):
@@ -129,6 +135,37 @@ def load_flickr30k(config: RetrievalConfig) -> List[Dict]:
     return records
 
 
+def load_coco_captions(config: RetrievalConfig) -> List[Dict]:
+    logging.info("Loading COCO Captions from Hugging Face: split=%s", config.split)
+
+    ds_all = load_dataset(DATASET_REGISTRY["coco_captions"])
+    available_splits = sorted(ds_all.keys())
+    if config.split not in ds_all:
+        raise ValueError(
+            f"Split '{config.split}' not found for coco_captions. Available splits: {available_splits}"
+        )
+
+    ds = ds_all[config.split]
+    records: List[Dict] = []
+    max_items = config.max_images if config.max_images is not None else len(ds)
+    for idx, item in tqdm(enumerate(ds), total=min(len(ds), max_items), desc="dataset"):
+        if idx >= max_items:
+            break
+        captions = _extract_captions(item)
+        image = _extract_image(item)
+        image_id = _extract_image_id(item, idx)
+        records.append(
+            {
+                "image_id": image_id,
+                "image": image,
+                "captions": captions,
+                "split": config.split,
+            }
+        )
+    logging.info("Loaded %d images", len(records))
+    return records
+
+
 def build_caption_pairs(
     records: List[Dict], max_captions: int | None = None
 ) -> List[Tuple[str, str]]:
@@ -139,3 +176,13 @@ def build_caption_pairs(
             if max_captions is not None and len(pairs) >= max_captions:
                 return pairs
     return pairs
+
+
+def load_dataset_records(config: RetrievalConfig) -> List[Dict]:
+    if config.dataset == "flickr30k":
+        return load_flickr30k(config)
+    if config.dataset == "coco_captions":
+        return load_coco_captions(config)
+    raise ValueError(
+        f"Unknown dataset '{config.dataset}'. Supported: {list(DATASET_REGISTRY.keys())}"
+    )

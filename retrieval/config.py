@@ -5,6 +5,7 @@ from typing import Optional
 
 @dataclass
 class RetrievalConfig:
+    dataset: str = "flickr30k"
     source: str = "hf"
     split: str = "test"
     model_name: str = "openai/clip-vit-base-patch32"

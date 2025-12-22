@@ -1,7 +1,8 @@
-"""Scaling benchmark for Flickr30k retrieval.
+"""Scaling benchmark for text-to-image retrieval.
 
 Runs brute-force, original-space HNSW, and pivot+HNSW across increasing N,
-reusing the same sampled queries (filtered to images within each N).
+reusing the same sampled queries (filtered to images within each N) and
+supporting multiple datasets (flickr30k, coco_captions).
 Outputs per-method metrics to CSV/JSON and plots latency and Recall@10 vs N.
 """
 
@@ -18,7 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from retrieval.config import RetrievalConfig
-from retrieval.data import build_caption_pairs, load_flickr30k
+from retrieval.data import build_caption_pairs, load_dataset_records
 from retrieval.embeddings import (
     load_clip,
     load_or_compute_caption_embeddings,
@@ -30,13 +31,19 @@ from scripts import benchmark_baselines as base
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Scaling benchmark for Flickr30k")
+    p = argparse.ArgumentParser(description="Scaling benchmark for retrieval")
+    p.add_argument(
+        "--dataset",
+        default="flickr30k",
+        choices=["flickr30k", "coco_captions"],
+        help="dataset",
+    )
     p.add_argument("--source", default="hf", choices=["hf"], help="data source")
     p.add_argument("--split", default="train")
     p.add_argument("--model_name", default="openai/clip-vit-base-patch32")
     p.add_argument("--device", default="cuda")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--Ns", default="2000,5000,10000,20000,29000")
+    p.add_argument("--Ns", default="5000,10000,20000,50000,80000")
     p.add_argument("--n_queries", type=int, default=1000)
     p.add_argument("--max_captions", type=int, default=10000)
     p.add_argument("--k", type=int, default=10)
@@ -44,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--topC", type=int, default=1200)
     p.add_argument("--pivot_efSearch", type=int, default=128)
     p.add_argument("--pivot_M", type=int, default=24)
+    p.add_argument("--pivot_prune_to", type=int, default=0)
+    p.add_argument("--orig_topC", type=int, default=None)
     p.add_argument("--orig_hnsw_efSearch", type=int, default=128)
     p.add_argument("--orig_hnsw_M", type=int, default=24)
     p.add_argument("--pivot_norm", choices=["none", "zscore"], default="none")
@@ -51,6 +60,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size_text", type=int, default=64)
     p.add_argument("--batch_size_image", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--num_threads", type=int, default=4)
+    p.add_argument(
+        "--rerank_device",
+        choices=["cpu", "cuda", "auto"],
+        default="auto",
+        help="device for rerank; auto picks cuda if available",
+    )
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
     p.add_argument("--force_recompute", action="store_true")
@@ -69,6 +85,7 @@ def main() -> None:
     max_N = max(Ns)
 
     base_config = RetrievalConfig(
+        dataset=args.dataset,
         source=args.source,
         split=args.split,
         model_name=args.model_name,
@@ -85,18 +102,20 @@ def main() -> None:
     )
 
     logging.info("Loading dataset and embeddings (max_images=%d)", max_N)
-    records = load_flickr30k(base_config)
+    records = load_dataset_records(base_config)
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
 
     model, processor = load_clip(base_config.model_name, base_config.device)
     image_embs, image_ids = load_or_compute_image_embeddings(
         records, base_config, model, processor
     )
+    image_embs = base.ensure_float32_contig(image_embs)
 
     config_text = replace(base_config, batch_size=args.batch_size_text)
     caption_embs = load_or_compute_caption_embeddings(
         caption_pairs, config_text, model, processor
     )
+    caption_embs = base.ensure_float32_contig(caption_embs)
 
     sampled_pairs, sampled_idx = base.sample_queries(
         caption_pairs, args.n_queries, args.seed
@@ -108,7 +127,15 @@ def main() -> None:
 
     for N in Ns:
         logging.info("Running scaling experiment for N=%d", N)
-        allowed_ids = set(image_ids[:N])
+        actual_N = min(N, len(image_ids))
+        if actual_N < N:
+            logging.warning(
+                "Requested N=%d exceeds dataset size %d; using N=%d",
+                N,
+                len(image_ids),
+                actual_N,
+            )
+        allowed_ids = set(image_ids[:actual_N])
         keep_mask = [gt in allowed_ids for gt in gt_ids]
         kept_indices = sampled_idx[keep_mask]
         if kept_indices.size == 0:
@@ -119,10 +146,10 @@ def main() -> None:
         gt_ids_subset = [gt for keep, gt in zip(keep_mask, gt_ids) if keep]
         gt_indices_subset = np.array([id_to_index[g] for g in gt_ids_subset], dtype=int)
 
-        image_embs_subset = image_embs[:N]
-        image_ids_subset = image_ids[:N]
+        image_embs_subset = image_embs[:actual_N]
+        image_ids_subset = image_ids[:actual_N]
 
-        cfg_N = replace(base_config, max_images=N)
+        cfg_N = replace(base_config, max_images=actual_N)
 
         preds_brute, brute_ms = base.brute_force_search(
             caption_embs_subset,
@@ -187,8 +214,10 @@ def main() -> None:
                     "D": image_embs.shape[1],
                     "model_name": base_config.model_name,
                     "device": base_config.device,
+                    "dataset": base_config.dataset,
                     "seed": base_config.seed,
-                    "max_images": N,
+                    "N_images": actual_N,
+                    "max_images": actual_N,
                     "max_captions": base_config.max_captions,
                     "k": base_config.k,
                     "pivot_norm": r.get("pivot_norm", "none"),

@@ -73,8 +73,11 @@ def load_or_compute_image_embeddings(
     embed_dir = _embedding_dir(config)
     model_tag = _sanitize_model_name(config.model_name)
     subset_tag = f"_n{len(records)}" if config.max_images is not None else ""
-    emb_path = embed_dir / f"images_{config.split}_{model_tag}{subset_tag}.npy"
-    ids_path = embed_dir / f"image_ids_{config.split}{subset_tag}.json"
+    emb_path = (
+        embed_dir
+        / f"{config.dataset}_images_{config.split}_{model_tag}{subset_tag}.npy"
+    )
+    ids_path = embed_dir / f"{config.dataset}_image_ids_{config.split}{subset_tag}.json"
 
     if emb_path.exists() and ids_path.exists() and not config.force_recompute:
         logging.info("Loading cached image embeddings from %s", emb_path)
@@ -119,8 +122,13 @@ def load_or_compute_caption_embeddings(
     embed_dir = _embedding_dir(config)
     model_tag = _sanitize_model_name(config.model_name)
     subset_tag = f"_n{len(pairs)}" if config.max_captions is not None else ""
-    emb_path = embed_dir / f"captions_{config.split}_{model_tag}{subset_tag}.npy"
-    mapping_path = embed_dir / f"caption_to_image_{config.split}{subset_tag}.json"
+    emb_path = (
+        embed_dir
+        / f"{config.dataset}_captions_{config.split}_{model_tag}{subset_tag}.npy"
+    )
+    mapping_path = (
+        embed_dir / f"{config.dataset}_caption_to_image_{config.split}{subset_tag}.json"
+    )
 
     if emb_path.exists() and mapping_path.exists() and not config.force_recompute:
         logging.info("Loading cached caption embeddings from %s", emb_path)
