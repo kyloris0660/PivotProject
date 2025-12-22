@@ -31,6 +31,11 @@ def _collate_images(batch: Sequence[Image.Image]) -> List[Image.Image]:
     return [img.convert("RGB") for img in batch]
 
 
+def _collate_identity(batch: Sequence[str]) -> List[str]:
+    # Top-level picklable collate for Windows multiprocessing; keeps text batch as list.
+    return list(batch)
+
+
 def _embed_image_batch(
     images: List[Image.Image], model: CLIPModel, processor: AutoProcessor, device: str
 ) -> torch.Tensor:
@@ -117,7 +122,7 @@ def load_or_compute_caption_embeddings(
         captions,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
-        collate_fn=lambda x: x,
+        collate_fn=_collate_identity,
     )
 
     all_feats: List[torch.Tensor] = []
