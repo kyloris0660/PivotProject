@@ -1,10 +1,12 @@
 import logging
+from io import BytesIO
 from typing import Dict, List, Tuple
 
 import datasets
 from datasets import load_dataset
 from packaging import version
 from PIL import Image
+import requests
 from tqdm import tqdm
 
 from .config import RetrievalConfig
@@ -91,9 +93,19 @@ def _extract_captions(record: Dict) -> List[str]:
 
 
 def _extract_image(record: Dict) -> Image.Image:
-    if "image" not in record:
-        raise KeyError("Dataset record missing 'image' field (PIL.Image expected).")
-    return record["image"]
+    if "image" in record and isinstance(record["image"], Image.Image):
+        return record["image"]
+
+    url = record.get("image_url") or record.get("url")
+    if url:
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            return Image.open(BytesIO(resp.content)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise KeyError(f"Failed to fetch image from url {url}: {exc}") from exc
+
+    raise KeyError("Dataset record missing 'image' field (PIL.Image expected).")
 
 
 def _extract_image_id(record: Dict, idx: int) -> str:
