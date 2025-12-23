@@ -119,7 +119,6 @@ def parse_args() -> argparse.Namespace:
 def apply_pivot_preset(args: argparse.Namespace) -> argparse.Namespace:
     if args.pivot_preset == "shortlist_g8":
         # Align with shortlist G8 winner (sim + cosine + zscore + learned, m=16)
-        args.pivot_source = "images"
         args.pivot_coord = "sim"
         args.pivot_metric = "cosine"
         args.pivot_norm = "zscore"
