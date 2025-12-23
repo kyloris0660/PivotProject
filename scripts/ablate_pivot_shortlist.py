@@ -206,6 +206,7 @@ def main() -> None:
     logging.info("Loading dataset and embeddings")
     records = load_dataset_records(base_config)
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
+    caption_image_ids = [pair[1] for pair in caption_pairs]
 
     model, processor = load_clip(base_config.model_name, base_config.device)
     image_embs, image_ids = load_or_compute_image_embeddings(
@@ -223,6 +224,7 @@ def main() -> None:
         caption_pairs, args.n_queries, args.seed
     )
     caption_embs_sample = caption_embs[sampled_idx]
+    caption_image_ids_sample = [caption_image_ids[i] for i in sampled_idx]
     gt_ids = [pair[1] for pair in sampled_pairs]
     id_to_index = {img_id: idx for idx, img_id in enumerate(image_ids)}
     gt_indices = np.array([id_to_index[g] for g in gt_ids], dtype=int)
@@ -268,6 +270,7 @@ def main() -> None:
 
         res = pivot_hnsw_method(
             caption_embs_sample,
+            caption_image_ids_sample,
             image_embs,
             image_ids,
             gt_indices,

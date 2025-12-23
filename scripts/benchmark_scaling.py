@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pivot_source",
-        choices=["images", "captions", "union", "mixture"],
+        choices=["images", "captions", "union", "mixture", "caption_guided_images"],
         default="images",
     )
     p.add_argument("--pivot_mix_ratio", type=float, default=0.5)
@@ -137,6 +137,7 @@ def main() -> None:
     logging.info("Loading dataset and embeddings (max_images=%d)", max_N)
     records = load_dataset_records(base_config)
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
+    caption_image_ids = [pair[1] for pair in caption_pairs]
 
     model, processor = load_clip(base_config.model_name, base_config.device)
     image_embs, image_ids = load_or_compute_image_embeddings(
@@ -176,6 +177,7 @@ def main() -> None:
             continue
 
         caption_embs_subset = caption_embs[kept_indices]
+        caption_image_ids_subset = [caption_image_ids[i] for i in kept_indices]
         gt_ids_subset = [gt for keep, gt in zip(keep_mask, gt_ids) if keep]
         gt_indices_subset = np.array([id_to_index[g] for g in gt_ids_subset], dtype=int)
 
@@ -233,6 +235,7 @@ def main() -> None:
 
         res_c = base.pivot_hnsw_method(
             caption_embs_subset,
+            caption_image_ids_subset,
             image_embs_subset,
             image_ids_subset,
             gt_indices_subset,

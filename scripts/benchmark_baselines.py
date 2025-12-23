@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pivot_source",
-        choices=["images", "captions", "union", "mixture"],
+        choices=["images", "captions", "union", "mixture", "caption_guided_images"],
         default="images",
     )
     p.add_argument("--pivot_mix_ratio", type=float, default=0.5)
@@ -523,6 +523,7 @@ def orig_hnsw_method(
 
 def pivot_hnsw_method(
     caption_embs: np.ndarray,
+    caption_image_ids: List[str],
     image_embs: np.ndarray,
     image_ids: List[str],
     gt_indices: np.ndarray,
@@ -552,7 +553,9 @@ def pivot_hnsw_method(
     image_embs = ensure_float32_contig(image_embs)
     caption_embs = ensure_float32_contig(caption_embs)
 
-    pivots, _ = select_pivots(image_embs, caption_embs, cfg)
+    pivots, _ = select_pivots(
+        image_embs, image_ids, caption_embs, caption_image_ids, cfg
+    )
     pivots = ensure_float32_contig(pivots)
 
     pivot_coords = compute_pivot_coordinates(
@@ -890,7 +893,13 @@ def main() -> None:
 
     # Method C: Pivot + HNSW
     res_c = pivot_hnsw_method(
-        caption_embs_sample, image_embs, image_ids, gt_indices, base_config, args
+        caption_embs_sample,
+        [pair[1] for pair in caption_pairs],
+        image_embs,
+        image_ids,
+        gt_indices,
+        base_config,
+        args,
     )
     recalls_c = compute_recalls(res_c.pop("preds"), gt_ids)
     res_c.update(recalls_c)

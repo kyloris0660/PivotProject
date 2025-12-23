@@ -35,7 +35,9 @@ def _subset(arr: np.ndarray, size: int, rng: np.random.RandomState) -> np.ndarra
 
 def build_pivot_pool(
     image_embs: np.ndarray,
+    image_ids: list[str],
     caption_embs: np.ndarray | None,
+    caption_image_ids: list[str] | None,
     config: RetrievalConfig,
 ) -> Tuple[np.ndarray, str]:
     """Build a normalized pivot pool according to the configured source."""
@@ -58,6 +60,26 @@ def build_pivot_pool(
         if cap_pool is None:
             raise ValueError("pivot_source=captions requires caption embeddings")
         pool = _subset(cap_pool, min(pool_size, cap_pool.shape[0]), rng)
+    elif source == "caption_guided_images":
+        if cap_pool is None or caption_image_ids is None:
+            raise ValueError(
+                "pivot_source=caption_guided_images requires caption embeddings and caption_image_ids"
+            )
+        id_to_idx = {img_id: idx for idx, img_id in enumerate(image_ids)}
+        sums = np.zeros_like(img_pool)
+        counts = np.zeros((img_pool.shape[0],), dtype=np.int32)
+        for emb, img_id in zip(cap_pool, caption_image_ids):
+            idx = id_to_idx.get(img_id)
+            if idx is None:
+                continue
+            sums[idx] += emb
+            counts[idx] += 1
+        mask = counts > 0
+        guided = img_pool.copy()
+        guided[mask] = sums[mask] / counts[mask][:, None]
+        guided = _l2_normalize(guided)
+        guided = np.ascontiguousarray(guided)
+        pool = _subset(guided, min(pool_size, guided.shape[0]), rng)
     elif source == "union":
         if cap_pool is None:
             raise ValueError("pivot_source=union requires caption embeddings")
@@ -93,13 +115,17 @@ def _pivot_cache_suffix(config: RetrievalConfig, tag: str) -> str:
 
 def select_pivots(
     image_embs: np.ndarray,
+    image_ids: list[str],
     caption_embs: np.ndarray | None,
+    caption_image_ids: list[str] | None,
     config: RetrievalConfig,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Select pivots via farthest-point sampling from the configured pool."""
 
     pivot_dir = _pivot_dir(config)
-    pool, pool_tag = build_pivot_pool(image_embs, caption_embs, config)
+    pool, pool_tag = build_pivot_pool(
+        image_embs, image_ids, caption_embs, caption_image_ids, config
+    )
     suffix = _pivot_cache_suffix(config, pool_tag)
     pivot_path = pivot_dir / f"pivots_{suffix}.npy"
     pivot_meta = pivot_dir / f"pivots_{suffix}.json"
