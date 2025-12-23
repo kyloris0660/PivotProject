@@ -484,7 +484,9 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
     if (
         split_key == "train2017"
         and not config.allow_coco_train_download
-        and not Path(config.coco_root or "").joinpath("annotations", f"captions_{split_key}.json").exists()
+        and not Path(config.coco_root or "")
+        .joinpath("annotations", f"captions_{split_key}.json")
+        .exists()
     ):
         raise RuntimeError(
             "train2017 is large (~118k images, 18GB). Pass --allow_coco_train_download to enable downloading train images."
@@ -529,9 +531,7 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
             cache_root = local_cache_root
 
     if captions_path.exists():
-        images_meta, captions_by_image = _load_coco_annotations_from_file(
-            captions_path
-        )
+        images_meta, captions_by_image = _load_coco_annotations_from_file(captions_path)
     else:
         images_meta, captions_by_image = _load_coco_annotations(cache_root, split_key)
 

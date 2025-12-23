@@ -133,6 +133,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_images", type=int, default=None)
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
+    p.add_argument(
+        "--recall_first",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Favor candidate recall: disable pruning unless explicitly set and bump efSearch if needed",
+    )
+    p.add_argument(
+        "--recall_efsearch_multiplier",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="When recall_first is enabled and efSearch < topC, set efSearch to topC * multiplier",
+    )
     p.add_argument("--force_recompute", action="store_true")
     p.add_argument("--warmup", type=int, default=10)
     return p.parse_args()
@@ -421,10 +434,7 @@ def main() -> None:
             coco_zip = Path("/content/coco2017/train2017.zip")
             if coco_zip.exists():
                 dst_zip = (
-                    Path(args.drive_out_root)
-                    / "datasets"
-                    / "coco2017"
-                    / coco_zip.name
+                    Path(args.drive_out_root) / "datasets" / "coco2017" / coco_zip.name
                 )
                 ensure_dir(dst_zip.parent)
                 if not dst_zip.exists():

@@ -133,6 +133,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
     p.add_argument("--pivot_prune_to", type=int, default=0)
     p.add_argument(
+        "--recall_first",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Favor candidate recall: disable pruning unless explicitly set and bump efSearch if needed",
+    )
+    p.add_argument(
+        "--recall_efsearch_multiplier",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="When recall_first is enabled and efSearch < topC, set efSearch to topC * multiplier",
+    )
+    p.add_argument(
         "--pivot_preset",
         choices=["none", "shortlist_g8"],
         default="none",
@@ -592,12 +605,39 @@ def pivot_hnsw_method(
     args: argparse.Namespace,
 ) -> Dict[str, float | int | str]:
     pivot_preset = getattr(args, "pivot_preset", "none")
+    recall_first = bool(getattr(args, "recall_first", True))
+    ef_bump_mult = max(1, int(getattr(args, "recall_efsearch_multiplier", 1)))
+    pivot_topC = args.topC
+    pivot_efSearch = args.pivot_efSearch
+    pivot_prune_requested = getattr(args, "pivot_prune_to", 0)
+    pivot_prune_to = pivot_prune_requested
+
+    if recall_first:
+        if pivot_prune_to == 0:
+            logging.info("recall_first=True: disabling pruning to favor candidate recall")
+        elif pivot_prune_to < pivot_topC:
+            logging.warning(
+                "recall_first=True: pivot_prune_to %d < topC %d; bumping to topC",
+                pivot_prune_to,
+                pivot_topC,
+            )
+            pivot_prune_to = pivot_topC
+
+        if pivot_efSearch < pivot_topC:
+            bumped_ef = max(pivot_topC, pivot_topC * ef_bump_mult)
+            logging.info(
+                "recall_first=True: efSearch bumped to %d for recall (was %d)",
+                bumped_ef,
+                pivot_efSearch,
+            )
+            pivot_efSearch = bumped_ef
+
     # Build a config for pivot path
     cfg = replace(
         base_config,
         m=args.pivot_m,
-        topC=args.topC,
-        ef_search=args.pivot_efSearch,
+        topC=pivot_topC,
+        ef_search=pivot_efSearch,
         M=args.pivot_M,
         force_recompute=args.force_recompute,
         pivot_norm=args.pivot_norm,
@@ -758,10 +798,10 @@ def pivot_hnsw_method(
     prune_ms = 0.0
     labels_for_rerank = labels
     actual_prune_to = labels.shape[1]
-    prune_enabled = bool(args.pivot_prune_to and args.pivot_prune_to > 0)
+    prune_enabled = bool(pivot_prune_to and pivot_prune_to > 0)
 
     if prune_enabled:
-        actual_prune_to = min(args.pivot_prune_to, labels.shape[1])
+        actual_prune_to = min(pivot_prune_to, labels.shape[1])
         # Fast path: rely on HNSW ordering; just slice top-k without recomputing distances
         labels_for_rerank = labels[:, :actual_prune_to]
 
@@ -853,7 +893,7 @@ def pivot_hnsw_method(
         "pivot_pool_size": cfg.pivot_pool_size,
         "pivot_mix_ratio": cfg.pivot_mix_ratio,
         "pivot_prune_to": actual_prune_to,
-        "pivot_prune_to_arg": args.pivot_prune_to,
+        "pivot_prune_to_arg": pivot_prune_requested,
         "pivot_prune_to_effective": actual_prune_to,
         "prune_enabled": prune_enabled,
         "prune_ms": prune_ms,
@@ -1095,10 +1135,7 @@ def main() -> None:
             coco_zip = Path("/content/coco2017/train2017.zip")
             if coco_zip.exists():
                 dst_zip = (
-                    Path(args.drive_out_root)
-                    / "datasets"
-                    / "coco2017"
-                    / coco_zip.name
+                    Path(args.drive_out_root) / "datasets" / "coco2017" / coco_zip.name
                 )
                 ensure_dir(dst_zip.parent)
                 if not dst_zip.exists():
