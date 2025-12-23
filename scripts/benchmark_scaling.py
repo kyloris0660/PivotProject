@@ -103,6 +103,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow downloading large COCO train2017 images in fallback mode",
     )
+    p.add_argument(
+        "--persist_to_drive",
+        action="store_true",
+        help="Persist downloaded COCO subsets to Google Drive for reuse",
+    )
+    p.add_argument(
+        "--drive_root",
+        default="/content/drive/MyDrive/PivotProjectCache",
+        help="Drive root for persisted datasets",
+    )
+    p.add_argument(
+        "--coco_persist_tag",
+        default="auto",
+        help="Tag for Drive manifest (auto derives split/max_images/seed)",
+    )
     p.add_argument("--max_images", type=int, default=None)
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
@@ -123,6 +138,19 @@ def main() -> None:
         raise ValueError("Ns must not be empty")
     max_N = max(Ns)
     max_images = args.max_images if args.max_images is not None else max_N
+
+    coco_tag = args.coco_persist_tag
+    if not coco_tag or coco_tag == "auto":
+        coco_tag = f"coco2017_{args.split}_n{max_images}_seed{args.seed}"
+    if args.persist_to_drive and not Path("/content/drive").exists():
+        logging.info(
+            "persist_to_drive requested but /content/drive not found. In Colab run drive.mount('/content/drive') first."
+        )
+    drive_sync = {
+        "persist_to_drive": args.persist_to_drive,
+        "drive_root": args.drive_root,
+        "tag": coco_tag,
+    }
 
     base_config = RetrievalConfig(
         dataset=args.dataset,
@@ -151,6 +179,8 @@ def main() -> None:
         max_captions=args.max_captions,
         k=args.k,
         allow_coco_train_download=args.allow_coco_train_download,
+        coco_root=None,
+        drive_sync=drive_sync,
     )
 
     logging.info("Loading dataset and embeddings (max_images=%d)", max_N)
