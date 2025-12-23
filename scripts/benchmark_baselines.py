@@ -729,8 +729,9 @@ def pivot_hnsw_method(
     prune_ms = 0.0
     labels_for_rerank = labels
     actual_prune_to = labels.shape[1]
+    prune_enabled = bool(args.pivot_prune_to and args.pivot_prune_to > 0)
 
-    if args.pivot_prune_to and args.pivot_prune_to > 0:
+    if prune_enabled:
         actual_prune_to = min(args.pivot_prune_to, labels.shape[1])
         # Fast path: rely on HNSW ordering; just slice top-k without recomputing distances
         labels_for_rerank = labels[:, :actual_prune_to]
@@ -823,6 +824,9 @@ def pivot_hnsw_method(
         "pivot_pool_size": cfg.pivot_pool_size,
         "pivot_mix_ratio": cfg.pivot_mix_ratio,
         "pivot_prune_to": actual_prune_to,
+        "pivot_prune_to_arg": args.pivot_prune_to,
+        "pivot_prune_to_effective": actual_prune_to,
+        "prune_enabled": prune_enabled,
         "prune_ms": prune_ms,
         "rerank_device": rerank_device,
         "pivot_preset": args.pivot_preset,
