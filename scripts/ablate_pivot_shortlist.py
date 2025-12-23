@@ -231,6 +231,19 @@ def main() -> None:
 
     for conf in SHORTLIST:
         run_args = argparse.Namespace(**vars(args))
+        # Ensure pivot-related fields exist even if not provided via CLI
+        if not hasattr(run_args, "pivot_source"):
+            run_args.pivot_source = "images"
+        if not hasattr(run_args, "pivot_coord"):
+            run_args.pivot_coord = "sim"
+        if not hasattr(run_args, "pivot_metric"):
+            run_args.pivot_metric = "cosine"
+        if not hasattr(run_args, "pivot_norm"):
+            run_args.pivot_norm = "none"
+        if not hasattr(run_args, "pivot_weight"):
+            run_args.pivot_weight = "none"
+        if not hasattr(run_args, "pivot_m"):
+            run_args.pivot_m = 16
         run_args.pivot_source = conf.get("pivot_source", run_args.pivot_source)
         run_args.pivot_mix_ratio = conf.get("pivot_mix_ratio", run_args.pivot_mix_ratio)
         run_args.pivot_coord = conf.get("pivot_coord", run_args.pivot_coord)
