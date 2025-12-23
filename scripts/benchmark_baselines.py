@@ -576,7 +576,9 @@ def pivot_hnsw_method(
         pivot_source=args.pivot_source,
         pivot_mix_ratio=args.pivot_mix_ratio,
         pivot_pool_size=args.pivot_pool_size,
-        pivot_caption_sample=getattr(args, "pivot_caption_sample", base_config.pivot_caption_sample),
+        pivot_caption_sample=getattr(
+            args, "pivot_caption_sample", base_config.pivot_caption_sample
+        ),
         pivot_coord=args.pivot_coord,
         pivot_metric=args.pivot_metric,
         pivot_weight_eps=args.pivot_weight_eps,
@@ -591,7 +593,9 @@ def pivot_hnsw_method(
         image_embs, image_ids, caption_embs, caption_image_ids, cfg
     )
     pivot_stats = pivot_meta.get("stats", {}) if isinstance(pivot_meta, dict) else {}
-    pivot_image_ids = pivot_meta.get("pivot_image_ids") if isinstance(pivot_meta, dict) else None
+    pivot_image_ids = (
+        pivot_meta.get("pivot_image_ids") if isinstance(pivot_meta, dict) else None
+    )
     if pivot_image_ids:
         assert len(pivot_image_ids) == len(pivots)
         missing = [pid for pid in pivot_image_ids if pid not in set(image_ids)]
@@ -614,8 +618,12 @@ def pivot_hnsw_method(
         piv_norm = pivots / np.linalg.norm(pivots, axis=1, keepdims=True)
         cover_max = np.max(cover_caps @ piv_norm.T, axis=1)
         pivot_stats.setdefault("pivot_cover_maxsim_mean", float(np.mean(cover_max)))
-        pivot_stats.setdefault("pivot_cover_maxsim_p50", float(np.percentile(cover_max, 50)))
-        pivot_stats.setdefault("pivot_cover_maxsim_p90", float(np.percentile(cover_max, 90)))
+        pivot_stats.setdefault(
+            "pivot_cover_maxsim_p50", float(np.percentile(cover_max, 50))
+        )
+        pivot_stats.setdefault(
+            "pivot_cover_maxsim_p90", float(np.percentile(cover_max, 90))
+        )
     pivots = ensure_float32_contig(pivots)
 
     pivot_coords = compute_pivot_coordinates(
@@ -720,22 +728,12 @@ def pivot_hnsw_method(
 
     prune_ms = 0.0
     labels_for_rerank = labels
-    actual_prune_to = (
-        min(args.pivot_prune_to, labels.shape[1]) if args.pivot_prune_to > 0 else 0
-    )
-    if 0 < actual_prune_to < labels.shape[1]:
-        t_prune = time.perf_counter()
-        dists = np.sum((pivot_coords[labels] - pivot_queries[:, None, :]) ** 2, axis=2)
-        idx_keep = np.argpartition(dists, actual_prune_to - 1, axis=1)[
-            :, :actual_prune_to
-        ]
-        dist_keep = np.take_along_axis(dists, idx_keep, axis=1)
-        order_keep = np.argsort(dist_keep, axis=1)
-        sorted_keep = np.take_along_axis(idx_keep, order_keep, axis=1)
-        labels_for_rerank = np.take_along_axis(labels, sorted_keep, axis=1)
-        prune_ms = (time.perf_counter() - t_prune) * 1000 / labels.shape[0]
-    else:
-        actual_prune_to = labels.shape[1]
+    actual_prune_to = labels.shape[1]
+
+    if args.pivot_prune_to and args.pivot_prune_to > 0:
+        actual_prune_to = min(args.pivot_prune_to, labels.shape[1])
+        # Fast path: rely on HNSW ordering; just slice top-k without recomputing distances
+        labels_for_rerank = labels[:, :actual_prune_to]
 
     rerank_device = args.rerank_device
     if rerank_device == "auto":
