@@ -53,8 +53,10 @@ def parse_args() -> argparse.Namespace:
 def run_one(
     config: RetrievalConfig, records, caption_pairs, image_embs, image_ids, caption_embs
 ) -> Dict[str, float]:
-    pivots, _ = select_pivots(image_embs, config)
-    pivot_coords = compute_pivot_coordinates(image_embs, pivots, config, config.split)
+    pivots, _ = select_pivots(image_embs, caption_embs, config)
+    pivot_coords = compute_pivot_coordinates(
+        image_embs, pivots, config, config.split, kind="images"
+    )
     hnsw_index, build_time = build_or_load_index(pivot_coords, config)
     metrics = evaluate_retrieval(
         caption_pairs=caption_pairs,

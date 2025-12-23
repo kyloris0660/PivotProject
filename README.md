@@ -45,19 +45,27 @@ python -m scripts.benchmark_baselines --device cuda \
 ```
 输出：`results/benchmark_*.json`、`results/benchmark_*.csv`，以及 `plots/benchmark_latency_vs_recall_*.png`。每种方法记录 Recall@1/5/10、平均查询延迟（分拆 brute/hnsw/pivot_map/rerank）、索引构建时间、索引大小等。
 
+### Timing Definition（统一计时口径）
+- brute_force: `avg_total_ms = brute_force_ms`
+- orig_hnsw: `avg_total_ms = hnsw_ms + rerank_ms (+ prune_ms)`
+- pivot_hnsw: `avg_total_ms = pivot_map_ms + hnsw_ms + prune_ms + rerank_ms`
+所有方法额外输出 `sum_components_ms` 作为显式求和 sanity check。
+
 额外加速/诊断参数：
 - `--rerank_device {cpu,cuda,auto}`（默认 auto，CUDA 可选 GPU rerank）
 - `--pivot_prune_to N`：pivot 空间二阶段裁剪（仅保留 N 个候选进入原空间 rerank）
 - `--num_threads`：传给 hnswlib `set_num_threads`
 - `--orig_topC`：原空间 HNSW 的候选深度，用于记录 CandRecall@topC（默认等于 k）
 
-可选 pivot 表达组合（`--pivot_norm`, `--pivot_weight`），建议跑四组：
-- `(none, none)`（基线）
-- `(zscore, none)`
-- `(none, variance)`
-- `(zscore, variance)`
+候选诊断：
+- `CandRecall@topC`、`CandRecall@pruned`（若裁剪，未裁剪时两者相等）
+- `cand_hit_rank_mean/median` 以及裁剪后的 `cand_hit_rank_*_pruned`
+- 计时分解字段：`pivot_map_ms`、`hnsw_ms`、`prune_ms`、`rerank_ms`、`sum_components_ms`
 
-候选集指标：在 pivot+HNSW 中额外输出 `CandRecall@topC`（gt 是否出现在 topC 候选）和命中名次统计（mean/median，未命中为 -1），便于区分候选阶段 vs rerank 阶段的损失。
+Pivot 新增可控项（用于 text→image 提升与消融）：
+- `--pivot_source {images,captions,union,mixture}` + `--pivot_mix_ratio` + `--pivot_pool_size`
+- `--pivot_coord {sim,dist}` 与 `--pivot_metric {l2,cosine,ip}`（cosine 自动 L2 归一化坐标）
+- `--pivot_weight {none,variance,learned}`，`--pivot_weight_eps`
 
 扩展：新增 `scripts/benchmark_scaling.py` 跑规模曲线（默认 split=train，N=5000/10000/20000/50000/80000，n_queries=1000，可按实际图像数自动截断）：
 ```bash
@@ -75,24 +83,47 @@ python -m scripts.benchmark_scaling --device cuda --pivot_m 16 --topC 1200 \
 
 在更大规模（>50k 图）下，brute-force 延迟线性增长，而 ANN（orig HNSW / pivot+HNSW）保持更平缓；pivot 方法在 topC 较小、prune 后 rerank 负载更低，应出现延迟优势拐点。
 
-## Colab 一键命令
-基准（validation split，max_images=50k，n_queries=2000）：
+### Colab 快速命令（根目录 /content/PivotProject）
+1) COCO val 8 张 smoke test（验证加载 + caption 预览）：
 ```bash
-python -m scripts.benchmark_baselines --dataset coco_captions --split validation --device cuda \
-	--max_images 50000 --n_queries 2000 --batch_size_text 128 --batch_size_image 128 \
-	--pivot_m 16 --topC 600 --pivot_prune_to 200 --pivot_efSearch 600 --pivot_M 24 \
+python - <<'PY'
+from retrieval.config import RetrievalConfig
+from retrieval.data import load_dataset_records
+cfg = RetrievalConfig(dataset="coco_captions", source="hf", split="val", max_images=8)
+recs = load_dataset_records(cfg)
+print(len(recs), recs[0].keys(), recs[0]["captions"][:2])
+PY
+```
+2) baseline benchmark（coco val 5k，修正后 avg_total_ms）：
+```bash
+python -m scripts.benchmark_baselines --dataset coco_captions --split val --device cuda \
+	--max_images 5000 --n_queries 1000 --batch_size_text 128 --batch_size_image 128 \
+	--pivot_source images --pivot_coord dist --pivot_metric l2 --pivot_weight none --pivot_norm none \
+	--pivot_m 16 --topC 600 --pivot_prune_to 0 --pivot_efSearch 600 --pivot_M 24 \
 	--orig_topC 600 --orig_hnsw_efSearch 256 --orig_hnsw_M 32 --num_threads 8 --rerank_device cuda
 ```
 
-规模曲线（Ns 自动截断到可用图像总数）：
+3) Ablation（text→image）：
 ```bash
-python -m scripts.benchmark_scaling --dataset coco_captions --split validation --device cuda \
-	--Ns 5000,10000,20000,50000,80000 --n_queries 2000 --batch_size_text 128 --batch_size_image 128 \
-	--pivot_m 16 --topC 600 --pivot_prune_to 200 --pivot_efSearch 600 --pivot_M 24 \
+python -m scripts.ablate_pivot_text2img --dataset coco_captions --split val --device cuda \
+	--max_images 5000 --n_queries 1000 --pivot_sources images,union,mixture \
+	--pivot_coords dist,sim --pivot_metrics l2,cosine --pivot_weights none,variance,learned \
+	--pivot_norms none,zscore --ms 16,32 --topC 600 --pivot_efSearch 600 --pivot_M 24 \
+	--batch_size_text 128 --batch_size_image 128 --num_threads 8 --rerank_device cuda
+```
+
+4) Scaling（Ns=5000,10000,20000,50000，使用修正后的 avg_total_ms）：
+```bash
+python -m scripts.benchmark_scaling --dataset coco_captions --split val --device cuda \
+	--Ns 5000,10000,20000,50000 --n_queries 1000 --batch_size_text 128 --batch_size_image 128 \
+	--pivot_source images --pivot_coord dist --pivot_metric l2 --pivot_weight none --pivot_norm none \
+	--pivot_m 16 --topC 600 --pivot_prune_to 0 --pivot_efSearch 600 --pivot_M 24 \
 	--orig_topC 600 --orig_hnsw_efSearch 256 --orig_hnsw_M 32 --num_threads 8 --rerank_device cuda
 ```
 
-输出保存在 `results/`（CSV/JSON）和 `plots/`（PNG）下。
+### COCO 数据集稳定性
+- HF 拉取失败时自动 fallback 到官方 COCO zip 整包下载（annotations + val/train 图片），支持断点缓存与重复解压复用；val 默认截断 5k，train 需显式 `--allow_coco_train_download`（~18GB）。
+- `_download_file` 带 3 次指数退避重试并自动 http 回退，适配 Colab SSL 问题。
 
 ## Caching Layout
 - Image embeddings: `cache/embeddings/{dataset}_images_{split}_{model}.npy`

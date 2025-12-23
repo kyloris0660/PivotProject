@@ -87,8 +87,10 @@ def main() -> None:
         caption_pairs, config, model, processor
     )
 
-    pivots, pivot_indices = select_pivots(image_embs, config)
-    pivot_coords = compute_pivot_coordinates(image_embs, pivots, config, config.split)
+    pivots, pivot_indices = select_pivots(image_embs, caption_embs, config)
+    pivot_coords = compute_pivot_coordinates(
+        image_embs, pivots, config, config.split, kind="images"
+    )
 
     hnsw_index, build_time = build_or_load_index(pivot_coords, config)
 

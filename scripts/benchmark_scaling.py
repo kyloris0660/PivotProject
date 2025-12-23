@@ -56,7 +56,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--orig_hnsw_efSearch", type=int, default=128)
     p.add_argument("--orig_hnsw_M", type=int, default=24)
     p.add_argument("--pivot_norm", choices=["none", "zscore"], default="none")
-    p.add_argument("--pivot_weight", choices=["none", "variance"], default="none")
+    p.add_argument(
+        "--pivot_weight",
+        choices=["none", "variance", "learned"],
+        default="none",
+    )
+    p.add_argument(
+        "--pivot_source",
+        choices=["images", "captions", "union", "mixture"],
+        default="images",
+    )
+    p.add_argument("--pivot_mix_ratio", type=float, default=0.5)
+    p.add_argument("--pivot_pool_size", type=int, default=50000)
+    p.add_argument("--pivot_coord", choices=["sim", "dist"], default="sim")
+    p.add_argument("--pivot_metric", choices=["l2", "cosine", "ip"], default="l2")
+    p.add_argument("--pivot_weight_eps", type=float, default=1e-6)
+    p.add_argument("--pivot_learn_pairs", type=int, default=20000)
+    p.add_argument("--pivot_learn_queries", type=int, default=2000)
+    p.add_argument("--pivot_learn_negs", type=int, default=8)
     p.add_argument("--batch_size_text", type=int, default=64)
     p.add_argument("--batch_size_image", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
@@ -98,6 +115,16 @@ def main() -> None:
         batch_size=args.batch_size_image,
         num_workers=args.num_workers,
         pivot_sample=args.pivot_sample,
+        pivot_source=args.pivot_source,
+        pivot_mix_ratio=args.pivot_mix_ratio,
+        pivot_pool_size=args.pivot_pool_size,
+        pivot_coord=args.pivot_coord,
+        pivot_metric=args.pivot_metric,
+        pivot_weight=args.pivot_weight,
+        pivot_weight_eps=args.pivot_weight_eps,
+        pivot_learn_pairs=args.pivot_learn_pairs,
+        pivot_learn_queries=args.pivot_learn_queries,
+        pivot_learn_negs=args.pivot_learn_negs,
         seed=args.seed,
         ef_construction=args.ef_construction,
         force_recompute=args.force_recompute,
@@ -169,6 +196,7 @@ def main() -> None:
         res_a: Dict[str, float | int | str] = {
             "method": "brute_force",
             "avg_total_ms": brute_ms,
+            "sum_components_ms": brute_ms,
             "brute_force_ms": brute_ms,
             "hnsw_ms": 0.0,
             "pivot_map_ms": 0.0,
@@ -182,8 +210,11 @@ def main() -> None:
             "pivot_norm": "none",
             "pivot_weight": "none",
             "CandRecall@topC": 1.0,
+            "CandRecall@pruned": 1.0,
             "cand_hit_rank_mean": -1.0,
             "cand_hit_rank_median": -1.0,
+            "cand_hit_rank_mean_pruned": -1.0,
+            "cand_hit_rank_median_pruned": -1.0,
             **recalls_brute,
         }
         results.append(res_a)

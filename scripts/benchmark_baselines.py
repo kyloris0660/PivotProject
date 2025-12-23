@@ -32,6 +32,7 @@ from retrieval.embeddings import (
     load_or_compute_image_embeddings,
 )
 from retrieval.pivots import compute_pivot_coordinates, select_pivots
+from retrieval.pivots import pivot_weight_paths
 from retrieval.utils import ensure_dir, save_json, set_seed, setup_logging
 
 
@@ -66,7 +67,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--orig_hnsw_efSearch", type=int, default=128)
     p.add_argument("--orig_hnsw_M", type=int, default=24)
     p.add_argument("--pivot_norm", choices=["none", "zscore"], default="none")
-    p.add_argument("--pivot_weight", choices=["none", "variance"], default="none")
+    p.add_argument(
+        "--pivot_weight",
+        choices=["none", "variance", "learned"],
+        default="none",
+    )
+    p.add_argument(
+        "--pivot_source",
+        choices=["images", "captions", "union", "mixture"],
+        default="images",
+    )
+    p.add_argument("--pivot_mix_ratio", type=float, default=0.5)
+    p.add_argument("--pivot_pool_size", type=int, default=50000)
+    p.add_argument("--pivot_coord", choices=["sim", "dist"], default="sim")
+    p.add_argument("--pivot_metric", choices=["l2", "cosine", "ip"], default="l2")
+    p.add_argument("--pivot_weight_eps", type=float, default=1e-6)
+    p.add_argument("--pivot_learn_pairs", type=int, default=20000)
+    p.add_argument("--pivot_learn_queries", type=int, default=2000)
+    p.add_argument("--pivot_learn_negs", type=int, default=8)
     p.add_argument("--batch_size_text", type=int, default=64)
     p.add_argument("--batch_size_image", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
@@ -265,25 +283,107 @@ def apply_pivot_transform(
     norm: str,
     weight: str,
     stats: Dict[str, np.ndarray] | None = None,
+    weight_vec: np.ndarray | None = None,
+    eps: float = 1e-6,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray] | None]:
-    if norm == "none" and weight == "none":
-        return coords, stats
+    """Apply zscore + diagonal weights (variance/learned) in fixed order."""
 
     if stats is None:
         mean = coords.mean(axis=0)
-        std = coords.std(axis=0) + 1e-6
+        std = coords.std(axis=0) + eps
+        stats = {"mean": mean, "std": std, "std_raw": std.copy()}
     else:
-        mean = stats["mean"]
-        std = stats["std"]
+        mean = stats.get("mean")
+        std = stats.get("std")
+        if mean is None or std is None:
+            raise ValueError("stats must contain mean and std when provided")
 
     if norm == "zscore":
-        coords = (coords - mean) / std
+        coords = (coords - mean) / (std + eps)
 
+    applied_weight: np.ndarray | None = None
     if weight == "variance":
-        weight_vec = 1.0 / std  # variance-based scaling
-        coords = coords * weight_vec
+        base_std = stats.get("std_raw", std)
+        applied_weight = (
+            weight_vec if weight_vec is not None else 1.0 / (base_std + eps)
+        )
+    elif weight == "learned":
+        if weight_vec is None:
+            weight_vec = stats.get("weight")
+        if weight_vec is None:
+            raise ValueError("learned weights requested but weight_vec is None")
+        applied_weight = weight_vec
 
-    return coords, {"mean": mean, "std": std}
+    if applied_weight is not None:
+        coords = coords * np.sqrt(applied_weight)
+        stats["weight"] = applied_weight
+
+    stats["mean"] = mean
+    stats["std"] = std
+    return coords, stats
+
+
+def _learn_diagonal_weights(
+    pivot_coords_img: np.ndarray,
+    pivot_queries: np.ndarray,
+    image_embs: np.ndarray,
+    caption_embs: np.ndarray,
+    gt_indices: np.ndarray,
+    config: RetrievalConfig,
+) -> np.ndarray:
+    """Compute diagonal weights by contrasting positives vs hard negatives."""
+
+    rng = np.random.RandomState(config.seed)
+    num_queries = min(
+        config.pivot_learn_queries, config.pivot_learn_pairs, pivot_queries.shape[0]
+    )
+    if num_queries <= 0:
+        return np.ones(pivot_coords_img.shape[1], dtype=np.float32)
+
+    sample_idx = rng.choice(pivot_queries.shape[0], size=num_queries, replace=False)
+    q_coords = pivot_queries[sample_idx]
+    q_embs = caption_embs[sample_idx]
+    pos_idx = gt_indices[sample_idx]
+
+    # Hard negatives from original space similarity
+    sims = q_embs @ image_embs.T
+    topk = min(config.pivot_learn_negs * 4 + 1, sims.shape[1])
+    top_idx = np.argpartition(-sims, topk - 1, axis=1)[:, :topk]
+
+    neg_coords_all: List[np.ndarray] = []
+    for qi, (row, pos) in enumerate(zip(top_idx, pos_idx)):
+        scores_row = sims[qi, row]
+        order = np.argsort(-scores_row)
+        ordered = row[order]
+        ordered = [idx for idx in ordered if idx != pos][: config.pivot_learn_negs]
+        if len(ordered) < config.pivot_learn_negs:
+            candidates = np.setdiff1d(np.arange(image_embs.shape[0]), np.array([pos]))
+            need = config.pivot_learn_negs - len(ordered)
+            if candidates.size > 0 and need > 0:
+                size_take = min(need, candidates.size)
+                extra = rng.choice(candidates, size=size_take, replace=False)
+                ordered.extend(list(extra))
+        while len(ordered) < config.pivot_learn_negs:
+            ordered.append(ordered[-1] if ordered else 0)
+        neg_coords_all.append(pivot_coords_img[ordered])
+
+    neg_coords = np.stack(neg_coords_all, axis=0)  # (Q, negs, D)
+    pos_coords = pivot_coords_img[pos_idx]
+
+    diff2_pos = (q_coords - pos_coords) ** 2
+    diff2_neg = (q_coords[:, None, :] - neg_coords) ** 2
+
+    mu_pos = diff2_pos.mean(axis=0)
+    mu_neg = diff2_neg.mean(axis=(0, 1))
+
+    raw = np.clip(mu_neg - mu_pos, 0, None)
+    mean_raw = float(raw.mean())
+    if mean_raw <= 0:
+        return np.ones(pivot_coords_img.shape[1], dtype=np.float32)
+
+    w = raw / (mean_raw + config.pivot_weight_eps)
+    w = np.maximum(w, config.pivot_weight_eps)
+    return w.astype(np.float32, copy=False)
 
 
 def orig_hnsw_method(
@@ -384,10 +484,17 @@ def orig_hnsw_method(
     hit_ranks = cand_ranks[cand_ranks >= 0]
     hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
     hit_rank_median = float(np.median(hit_ranks)) if hit_ranks.size else -1.0
+    cand_recall_pruned = cand_recall
+    hit_rank_mean_pruned = hit_rank_mean
+    hit_rank_median_pruned = hit_rank_median
+    prune_ms = 0.0
+
+    sum_components_ms = hnsw_ms + rerank_ms + prune_ms
 
     result: Dict[str, float | int | str] = {
         "method": "orig_hnsw",
-        "avg_total_ms": hnsw_ms,
+        "avg_total_ms": sum_components_ms,
+        "sum_components_ms": sum_components_ms,
         "hnsw_ms": hnsw_ms,
         "pivot_map_ms": 0.0,
         "rerank_ms": rerank_ms,
@@ -401,11 +508,14 @@ def orig_hnsw_method(
         "pivot_norm": "none",
         "pivot_weight": "none",
         "pivot_prune_to": 0,
-        "prune_ms": 0.0,
+        "prune_ms": prune_ms,
         "rerank_device": rerank_device,
         "CandRecall@topC": cand_recall,
+        "CandRecall@pruned": cand_recall_pruned,
         "cand_hit_rank_mean": hit_rank_mean,
         "cand_hit_rank_median": hit_rank_median,
+        "cand_hit_rank_mean_pruned": hit_rank_mean_pruned,
+        "cand_hit_rank_median_pruned": hit_rank_median_pruned,
     }
     result["preds"] = preds
     return result
@@ -427,27 +537,103 @@ def pivot_hnsw_method(
         ef_search=args.pivot_efSearch,
         M=args.pivot_M,
         force_recompute=args.force_recompute,
+        pivot_norm=args.pivot_norm,
+        pivot_weight=args.pivot_weight,
+        pivot_source=args.pivot_source,
+        pivot_mix_ratio=args.pivot_mix_ratio,
+        pivot_pool_size=args.pivot_pool_size,
+        pivot_coord=args.pivot_coord,
+        pivot_metric=args.pivot_metric,
+        pivot_weight_eps=args.pivot_weight_eps,
+        pivot_learn_pairs=args.pivot_learn_pairs,
+        pivot_learn_queries=args.pivot_learn_queries,
+        pivot_learn_negs=args.pivot_learn_negs,
     )
     image_embs = ensure_float32_contig(image_embs)
     caption_embs = ensure_float32_contig(caption_embs)
 
-    pivots, _ = select_pivots(image_embs, cfg)
+    pivots, _ = select_pivots(image_embs, caption_embs, cfg)
     pivots = ensure_float32_contig(pivots)
-    pivot_coords = compute_pivot_coordinates(image_embs, pivots, cfg, cfg.split)
-    pivot_coords = ensure_float32_contig(pivot_coords)
+
+    pivot_coords = compute_pivot_coordinates(
+        image_embs, pivots, cfg, cfg.split, kind="images"
+    )
+
+    # Query pivot coordinates
+    t_q = time.perf_counter()
+    pivot_queries_base = compute_pivot_coordinates(
+        caption_embs, pivots, cfg, cfg.split, kind="captions"
+    )
+
+    # Normalize (zscore) first, then weights
+    pivot_coords, stats = apply_pivot_transform(
+        pivot_coords, args.pivot_norm, "none", None, eps=cfg.pivot_weight_eps
+    )
+    pivot_queries, _ = apply_pivot_transform(
+        pivot_queries_base,
+        args.pivot_norm,
+        "none",
+        stats,
+        eps=cfg.pivot_weight_eps,
+    )
+
+    weight_vec = None
+    if args.pivot_weight == "variance":
+        weight_vec = 1.0 / (stats.get("std_raw", stats["std"]) + cfg.pivot_weight_eps)
+    elif args.pivot_weight == "learned":
+        weight_path, weight_meta = pivot_weight_paths(cfg)
+        if weight_path.exists() and weight_meta.exists() and not cfg.force_recompute:
+            logging.info("Loading learned pivot weights from %s", weight_path)
+            weight_vec = np.load(weight_path)
+        else:
+            weight_vec = _learn_diagonal_weights(
+                pivot_coords,
+                pivot_queries,
+                image_embs,
+                caption_embs,
+                gt_indices,
+                cfg,
+            )
+            np.save(weight_path, weight_vec)
+            save_json(
+                {
+                    "mode": "learned",
+                    "pivot_coord": cfg.pivot_coord,
+                    "pivot_metric": cfg.pivot_metric,
+                },
+                weight_meta,
+            )
 
     pivot_coords, stats = apply_pivot_transform(
-        pivot_coords, args.pivot_norm, args.pivot_weight, None
+        pivot_coords,
+        "none",
+        args.pivot_weight,
+        stats,
+        weight_vec,
+        eps=cfg.pivot_weight_eps,
     )
-    pivot_coords = ensure_float32_contig(pivot_coords)
+    pivot_queries, _ = apply_pivot_transform(
+        pivot_queries,
+        "none",
+        args.pivot_weight,
+        stats,
+        weight_vec,
+        eps=cfg.pivot_weight_eps,
+    )
 
+    pivot_coords = ensure_float32_contig(pivot_coords)
+    pivot_queries = ensure_float32_contig(pivot_queries)
+
+    pivot_map_ms = (time.perf_counter() - t_q) * 1000 / max(caption_embs.shape[0], 1)
+
+    space = "l2" if cfg.pivot_metric == "l2" else cfg.pivot_metric
     index_path = cfg.cache_path("index") / (
-        f"benchmark_pivot_hnsw_{cfg.split}_m{cfg.m}_M{cfg.M}_efc{cfg.ef_construction}_efs{cfg.ef_search}_seed{cfg.seed}_n{image_embs.shape[0]}"
+        f"benchmark_pivot_hnsw_{cfg.dataset}_{cfg.split}_{cfg.pivot_source}_{cfg.pivot_coord}_{cfg.pivot_metric}_m{cfg.m}_M{cfg.M}_efc{cfg.ef_construction}_efs{cfg.ef_search}_seed{cfg.seed}_n{image_embs.shape[0]}"
         f"_{args.pivot_norm}_{args.pivot_weight}.bin"
     )
     index, build_time, index_size = build_hnsw_index(
         pivot_coords,
-        space="l2",
+        space=space,
         M=cfg.M,
         ef_construction=cfg.ef_construction,
         ef_search=cfg.ef_search,
@@ -458,15 +644,6 @@ def pivot_hnsw_method(
     if args.num_threads and args.num_threads > 0:
         index.set_num_threads(args.num_threads)
 
-    # Map queries to pivot space (with optional normalization/weight)
-    t0 = time.perf_counter()
-    pivot_queries = 1.0 - caption_embs @ pivots.T
-    pivot_map_ms = (time.perf_counter() - t0) * 1000 / caption_embs.shape[0]
-    pivot_queries, _ = apply_pivot_transform(
-        pivot_queries, args.pivot_norm, args.pivot_weight, stats
-    )
-    pivot_queries = ensure_float32_contig(pivot_queries)
-
     labels, hnsw_ms = hnsw_search_batch(
         index,
         pivot_queries,
@@ -476,18 +653,14 @@ def pivot_hnsw_method(
         ef_search=cfg.ef_search,
         num_threads=args.num_threads,
     )
-
-    cand_recall, cand_ranks = compute_candidate_hits(labels, gt_indices)
-    hit_ranks = cand_ranks[cand_ranks >= 0]
-    hit_rank_mean = float(hit_ranks.mean()) if hit_ranks.size else -1.0
-    hit_rank_median = float(np.median(hit_ranks)) if hit_ranks.size else -1.0
+    labels = labels.astype(np.int64, copy=False)
 
     prune_ms = 0.0
     labels_for_rerank = labels
     actual_prune_to = (
         min(args.pivot_prune_to, labels.shape[1]) if args.pivot_prune_to > 0 else 0
     )
-    if actual_prune_to > 0 and actual_prune_to < labels.shape[1]:
+    if 0 < actual_prune_to < labels.shape[1]:
         t_prune = time.perf_counter()
         dists = np.sum((pivot_coords[labels] - pivot_queries[:, None, :]) ** 2, axis=2)
         idx_keep = np.argpartition(dists, actual_prune_to - 1, axis=1)[
@@ -498,6 +671,8 @@ def pivot_hnsw_method(
         sorted_keep = np.take_along_axis(idx_keep, order_keep, axis=1)
         labels_for_rerank = np.take_along_axis(labels, sorted_keep, axis=1)
         prune_ms = (time.perf_counter() - t_prune) * 1000 / labels.shape[0]
+    else:
+        actual_prune_to = labels.shape[1]
 
     rerank_device = args.rerank_device
     if rerank_device == "auto":
@@ -522,7 +697,7 @@ def pivot_hnsw_method(
         q_batch = caption_embs[start:end]
         t1 = time.perf_counter()
         if rerank_device == "cuda":
-            lab_tensor = torch.as_tensor(lab_batch, device="cuda")
+            lab_tensor = torch.as_tensor(lab_batch, device="cuda", dtype=torch.long)
             q_tensor = torch.as_tensor(q_batch, device="cuda")
             cand_emb = image_embs_torch[lab_tensor]
             scores = torch.einsum("bkd,bd->bk", cand_emb, q_tensor)
@@ -544,6 +719,18 @@ def pivot_hnsw_method(
             for row_sorted, lab_row in zip(sorted_idx, lab_batch):
                 preds.append([image_ids[lab_row[i]] for i in row_sorted])
 
+    cand_recall_top, cand_ranks_top = compute_candidate_hits(labels, gt_indices)
+    hit_top = cand_ranks_top[cand_ranks_top >= 0]
+    hit_rank_mean = float(hit_top.mean()) if hit_top.size else -1.0
+    hit_rank_median = float(np.median(hit_top)) if hit_top.size else -1.0
+
+    cand_recall_pruned, cand_ranks_pruned = compute_candidate_hits(
+        labels_for_rerank, gt_indices
+    )
+    hit_pruned = cand_ranks_pruned[cand_ranks_pruned >= 0]
+    hit_rank_mean_pruned = float(hit_pruned.mean()) if hit_pruned.size else -1.0
+    hit_rank_median_pruned = float(np.median(hit_pruned)) if hit_pruned.size else -1.0
+
     if rerank_times:
         total_time = sum(t for t, _ in rerank_times)
         total_q = sum(b for _, b in rerank_times)
@@ -551,9 +738,12 @@ def pivot_hnsw_method(
     else:
         rerank_ms = 0.0
 
+    sum_components_ms = pivot_map_ms + hnsw_ms + prune_ms + rerank_ms
+
     result: Dict[str, float | int | str] = {
         "method": "pivot_hnsw",
-        "avg_total_ms": pivot_map_ms + hnsw_ms + rerank_ms,
+        "avg_total_ms": sum_components_ms,
+        "sum_components_ms": sum_components_ms,
         "pivot_map_ms": pivot_map_ms,
         "hnsw_ms": hnsw_ms,
         "rerank_ms": rerank_ms,
@@ -566,12 +756,20 @@ def pivot_hnsw_method(
         "M": cfg.M,
         "pivot_norm": args.pivot_norm,
         "pivot_weight": args.pivot_weight,
+        "pivot_coord": cfg.pivot_coord,
+        "pivot_metric": cfg.pivot_metric,
+        "pivot_source": cfg.pivot_source,
+        "pivot_pool_size": cfg.pivot_pool_size,
+        "pivot_mix_ratio": cfg.pivot_mix_ratio,
         "pivot_prune_to": actual_prune_to,
         "prune_ms": prune_ms,
         "rerank_device": rerank_device,
-        "CandRecall@topC": cand_recall,
+        "CandRecall@topC": cand_recall_top,
+        "CandRecall@pruned": cand_recall_pruned,
         "cand_hit_rank_mean": hit_rank_mean,
         "cand_hit_rank_median": hit_rank_median,
+        "cand_hit_rank_mean_pruned": hit_rank_mean_pruned,
+        "cand_hit_rank_median_pruned": hit_rank_median_pruned,
     }
     # recalls filled by caller
     result["preds"] = preds  # temporary; stripped later
@@ -592,6 +790,16 @@ def main() -> None:
         batch_size=args.batch_size_image,
         num_workers=args.num_workers,
         pivot_sample=args.pivot_sample,
+        pivot_source=args.pivot_source,
+        pivot_mix_ratio=args.pivot_mix_ratio,
+        pivot_pool_size=args.pivot_pool_size,
+        pivot_coord=args.pivot_coord,
+        pivot_metric=args.pivot_metric,
+        pivot_weight=args.pivot_weight,
+        pivot_weight_eps=args.pivot_weight_eps,
+        pivot_learn_pairs=args.pivot_learn_pairs,
+        pivot_learn_queries=args.pivot_learn_queries,
+        pivot_learn_negs=args.pivot_learn_negs,
         seed=args.seed,
         ef_construction=args.ef_construction,
         force_recompute=args.force_recompute,
@@ -646,6 +854,7 @@ def main() -> None:
     res_a: Dict[str, float | int | str] = {
         "method": "brute_force",
         "avg_total_ms": brute_ms,
+        "sum_components_ms": brute_ms,
         "brute_force_ms": brute_ms,
         "hnsw_ms": 0.0,
         "pivot_map_ms": 0.0,
@@ -662,8 +871,11 @@ def main() -> None:
         "prune_ms": 0.0,
         "rerank_device": "cpu",
         "CandRecall@topC": 1.0,
+        "CandRecall@pruned": 1.0,
         "cand_hit_rank_mean": -1.0,
         "cand_hit_rank_median": -1.0,
+        "cand_hit_rank_mean_pruned": -1.0,
+        "cand_hit_rank_median_pruned": -1.0,
         **recalls_brute,
     }
     results.append(res_a)

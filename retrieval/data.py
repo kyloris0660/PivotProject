@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -144,46 +145,54 @@ def _download_file(url: str, dest: Path, desc: str) -> None:
                 tried_http = True
                 time.sleep(1)
                 continue
-            wait = 2**attempt
-            logging.warning(
-                "Download failed (%s) [%s], retry %d/3 in %ds",
-                desc,
-                exc,
-                attempt + 1,
-                wait,
-            )
-            time.sleep(wait)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            wait = 2**attempt
-            logging.warning(
-                "Download failed (%s) [%s], retry %d/3 in %ds",
-                desc,
-                exc,
-                attempt + 1,
-                wait,
-            )
-            time.sleep(wait)
+
+        wait = 2**attempt
+        logging.warning(
+            "Download failed (%s) [%s], retry %d/3 in %ds",
+            desc,
+            last_exc,
+            attempt + 1,
+            wait,
+        )
+        time.sleep(wait)
 
     raise RuntimeError(f"Failed to download {url}: {last_exc}") from last_exc
 
 
+def _download_and_extract_zip(
+    url: str, zip_path: Path, extract_dir: Path, desc: str
+) -> None:
+    """Download a zip once and extract; reuse existing artifacts."""
+
+    extract_dir.parent.mkdir(parents=True, exist_ok=True)
+    if extract_dir.exists():
+        return
+
+    if not zip_path.exists():
+        _download_file(url, zip_path, desc=desc)
+
+    if not extract_dir.exists():
+        logging.info("Extracting %s to %s", zip_path, extract_dir)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir.parent)
+
+
 def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict]:
     ann_dir = cache_root / "annotations"
-    ann_dir.mkdir(parents=True, exist_ok=True)
     ann_zip = ann_dir / "annotations_trainval2017.zip"
-    if not ann_zip.exists():
-        # Use http to avoid occasional SSL hostname mismatch errors in some Colab environments
-        url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
-        _download_file(url, ann_zip, desc="download_annotations")
-        import zipfile
-
-        with zipfile.ZipFile(ann_zip, "r") as zf:
-            zf.extractall(ann_dir)
+    extract_dir = ann_dir
+    _download_and_extract_zip(
+        url="http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+        zip_path=ann_zip,
+        extract_dir=extract_dir,
+        desc="download_annotations",
+    )
 
     ann_map = {
-        "train2017": ann_dir / "annotations" / "captions_train2017.json",
-        "val2017": ann_dir / "annotations" / "captions_val2017.json",
+        "train2017": extract_dir / "annotations" / "captions_train2017.json",
+        "val2017": extract_dir / "annotations" / "captions_val2017.json",
     }
     if split_key not in ann_map:
         raise ValueError(f"Unsupported COCO split '{split_key}' for annotations")
@@ -203,16 +212,15 @@ def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict
     return images, captions_by_image
 
 
-def _ensure_coco_image(cache_root: Path, split_dir: str, file_name: str) -> Path:
-    split_path = cache_root / split_dir
-    split_path.mkdir(parents=True, exist_ok=True)
-    dest = split_path / file_name
-    if dest.exists():
-        return dest
-    # Use http to avoid SSL hostname mismatch in some Colab environments
-    base_url = f"http://images.cocodataset.org/{split_dir}/{file_name}"
-    _download_file(base_url, dest, desc=f"{split_dir}_{file_name}")
-    return dest
+def _ensure_coco_images(cache_root: Path, split_key: str) -> Path:
+    zips_dir = cache_root / "zips"
+    zips_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = zips_dir / f"{split_key}.zip"
+    split_dir = cache_root / split_key
+
+    url = f"http://images.cocodataset.org/zips/{split_key}.zip"
+    _download_and_extract_zip(url, zip_path, split_dir, desc=f"download_{split_key}")
+    return split_dir
 
 
 def _extract_image_id(record: Dict, idx: int) -> str:
@@ -345,11 +353,13 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
         config.max_images if config.max_images is not None else len(all_image_ids)
     )
     if split_key == "val2017":
-        max_images = min(max_images, 5000)  # val set size
+        max_images = min(max_images, 5000)
     selected_ids = all_image_ids[:max_images]
     logging.info(
         "COCO fallback using split=%s, images=%d", split_key, len(selected_ids)
     )
+
+    split_dir = _ensure_coco_images(cache_root, split_key)
 
     records: List[Dict] = []
     for img_id in tqdm(selected_ids, desc="dataset"):
@@ -357,7 +367,10 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
         file_name = meta.get("file_name")
         if not file_name:
             continue
-        img_path = _ensure_coco_image(cache_root, split_key, file_name)
+        img_path = split_dir / file_name
+        if not img_path.exists():
+            logging.warning("Image missing after extract: %s", img_path)
+            continue
         try:
             image = Image.open(img_path).convert("RGB")
         except Exception as exc:  # noqa: BLE001

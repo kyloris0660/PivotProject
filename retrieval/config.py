@@ -16,6 +16,16 @@ class RetrievalConfig:
     topC: int = 500
     k: int = 10
     pivot_sample: int = 5000
+    pivot_source: str = "images"
+    pivot_mix_ratio: float = 0.5
+    pivot_pool_size: int = 50000
+    pivot_coord: str = "sim"
+    pivot_metric: str = "l2"
+    pivot_weight: str = "none"
+    pivot_weight_eps: float = 1e-6
+    pivot_learn_pairs: int = 20000
+    pivot_learn_queries: int = 2000
+    pivot_learn_negs: int = 8
     seed: int = 42
     M: int = 32
     ef_construction: int = 200
