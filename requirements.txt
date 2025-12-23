@@ -10,4 +10,5 @@ tqdm>=4.66.0
 hnswlib>=0.8.0
 matplotlib>=3.8.0
 numpy>=1.26.0
-scikit-learn==1.4.2
+# Colab ships umap-learn/hdbscan expecting sklearn>=1.6; keep floor to satisfy them
+scikit-learn>=1.6.0
