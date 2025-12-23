@@ -45,6 +45,13 @@ python -m scripts.benchmark_baselines --device cuda \
 ```
 输出：`results/benchmark_*.json`、`results/benchmark_*.csv`，以及 `plots/benchmark_latency_vs_recall_*.png`。每种方法记录 Recall@1/5/10、平均查询延迟（分拆 brute/hnsw/pivot_map/rerank）、索引构建时间、索引大小等。
 
+快捷复现 shortlist 冠军（G8: sim + cosine + zscore + learned, m=16, topC=600）：
+```bash
+python -m scripts.benchmark_baselines --dataset coco_captions --split val --device cuda \
+	--max_images 5000 --n_queries 1000 --batch_size_text 128 --batch_size_image 128 \
+	--pivot_preset shortlist_g8 --num_threads 8 --rerank_device cuda
+```
+
 ### Timing Definition（统一计时口径）
 - brute_force: `avg_total_ms = brute_force_ms`
 - orig_hnsw: `avg_total_ms = hnsw_ms + rerank_ms (+ prune_ms)`

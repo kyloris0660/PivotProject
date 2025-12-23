@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
     p.add_argument("--pivot_prune_to", type=int, default=0)
     p.add_argument(
+        "--pivot_preset",
+        choices=["none", "shortlist_g8"],
+        default="none",
+        help="Preset pivot config; shortlist_g8 enforces the shortlist G8 winner",
+    )
+    p.add_argument(
         "--rerank_device",
         choices=["cpu", "cuda", "auto"],
         default="auto",
@@ -108,6 +114,22 @@ def parse_args() -> argparse.Namespace:
         "--warmup", type=int, default=10, help="warmup queries before timing"
     )
     return p.parse_args()
+
+
+def apply_pivot_preset(args: argparse.Namespace) -> argparse.Namespace:
+    if args.pivot_preset == "shortlist_g8":
+        # Align with shortlist G8 winner (sim + cosine + zscore + learned, m=16)
+        args.pivot_source = "images"
+        args.pivot_coord = "sim"
+        args.pivot_metric = "cosine"
+        args.pivot_norm = "zscore"
+        args.pivot_weight = "learned"
+        args.pivot_m = 16
+        args.topC = 600
+        args.pivot_efSearch = 1200
+        args.pivot_M = 24
+        # Allow user override of prune depth via CLI (default 0)
+    return args
 
 
 def sample_queries(
@@ -507,9 +529,13 @@ def orig_hnsw_method(
         "M": cfg.M,
         "pivot_norm": "none",
         "pivot_weight": "none",
+        "pivot_coord": "none",
+        "pivot_metric": "none",
+        "pivot_source": "none",
         "pivot_prune_to": 0,
         "prune_ms": prune_ms,
         "rerank_device": rerank_device,
+        "pivot_preset": args.pivot_preset,
         "CandRecall@topC": cand_recall,
         "CandRecall@pruned": cand_recall_pruned,
         "cand_hit_rank_mean": hit_rank_mean,
@@ -767,6 +793,7 @@ def pivot_hnsw_method(
         "pivot_prune_to": actual_prune_to,
         "prune_ms": prune_ms,
         "rerank_device": rerank_device,
+        "pivot_preset": args.pivot_preset,
         "CandRecall@topC": cand_recall_top,
         "CandRecall@pruned": cand_recall_pruned,
         "cand_hit_rank_mean": hit_rank_mean,
@@ -781,6 +808,7 @@ def pivot_hnsw_method(
 
 def main() -> None:
     args = parse_args()
+    args = apply_pivot_preset(args)
     setup_logging()
     set_seed(args.seed)
 
@@ -870,9 +898,13 @@ def main() -> None:
         "M": 0,
         "pivot_norm": "none",
         "pivot_weight": "none",
+        "pivot_coord": "none",
+        "pivot_metric": "none",
+        "pivot_source": "none",
         "pivot_prune_to": 0,
         "prune_ms": 0.0,
         "rerank_device": "cpu",
+        "pivot_preset": args.pivot_preset,
         "CandRecall@topC": 1.0,
         "CandRecall@pruned": 1.0,
         "cand_hit_rank_mean": -1.0,
