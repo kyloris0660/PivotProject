@@ -22,6 +22,7 @@ class RetrievalConfig:
     pivot_coord: str = "sim"
     pivot_metric: str = "l2"
     pivot_weight: str = "none"
+    pivot_norm: str = "none"
     pivot_weight_eps: float = 1e-6
     pivot_learn_pairs: int = 20000
     pivot_learn_queries: int = 2000
