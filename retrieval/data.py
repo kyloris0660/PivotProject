@@ -191,8 +191,8 @@ def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict
     )
 
     ann_map = {
-        "train2017": extract_dir / "annotations" / "captions_train2017.json",
-        "val2017": extract_dir / "annotations" / "captions_val2017.json",
+        "train2017": extract_dir / "captions_train2017.json",
+        "val2017": extract_dir / "captions_val2017.json",
     }
     if split_key not in ann_map:
         raise ValueError(f"Unsupported COCO split '{split_key}' for annotations")
