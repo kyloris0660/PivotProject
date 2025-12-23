@@ -2,6 +2,7 @@
 
 Outputs CSV/JSON plus two scatter plots (CandRecall@topC vs latency, Recall@10 vs latency).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -9,7 +10,7 @@ import logging
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -109,7 +110,12 @@ SHORTLIST: List[Dict[str, object]] = [
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Shortlist ablation for pivot_hnsw")
-    p.add_argument("--dataset", default="coco_captions", choices=["flickr30k", "coco_captions", "conceptual_captions"], help="dataset")
+    p.add_argument(
+        "--dataset",
+        default="coco_captions",
+        choices=["flickr30k", "coco_captions", "conceptual_captions"],
+        help="dataset",
+    )
     p.add_argument("--source", default="hf", choices=["hf"], help="data source")
     p.add_argument("--split", default="val")
     p.add_argument("--model_name", default="openai/clip-vit-base-patch32")
@@ -202,14 +208,20 @@ def main() -> None:
     caption_pairs = build_caption_pairs(records, base_config.max_captions)
 
     model, processor = load_clip(base_config.model_name, base_config.device)
-    image_embs, image_ids = load_or_compute_image_embeddings(records, base_config, model, processor)
+    image_embs, image_ids = load_or_compute_image_embeddings(
+        records, base_config, model, processor
+    )
     image_embs = ensure_float32_contig(image_embs)
 
     config_text = replace(base_config, batch_size=args.batch_size_text)
-    caption_embs = load_or_compute_caption_embeddings(caption_pairs, config_text, model, processor)
+    caption_embs = load_or_compute_caption_embeddings(
+        caption_pairs, config_text, model, processor
+    )
     caption_embs = ensure_float32_contig(caption_embs)
 
-    sampled_pairs, sampled_idx = sample_queries(caption_pairs, args.n_queries, args.seed)
+    sampled_pairs, sampled_idx = sample_queries(
+        caption_pairs, args.n_queries, args.seed
+    )
     caption_embs_sample = caption_embs[sampled_idx]
     gt_ids = [pair[1] for pair in sampled_pairs]
     id_to_index = {img_id: idx for idx, img_id in enumerate(image_ids)}
@@ -223,9 +235,17 @@ def main() -> None:
         run_args.pivot_mix_ratio = conf.get("pivot_mix_ratio", run_args.pivot_mix_ratio)
         run_args.pivot_coord = conf.get("pivot_coord", run_args.pivot_coord)
         run_args.pivot_metric = conf.get("pivot_metric", run_args.pivot_metric)
-        run_args.pivot_norm = conf.get("pivot_norm", run_args.pivot_norm if hasattr(run_args, "pivot_norm") else "none")
-        run_args.pivot_weight = conf.get("pivot_weight", run_args.pivot_weight if hasattr(run_args, "pivot_weight") else "none")
-        run_args.pivot_m = conf.get("pivot_m", run_args.pivot_m if hasattr(run_args, "pivot_m") else 16)
+        run_args.pivot_norm = conf.get(
+            "pivot_norm",
+            run_args.pivot_norm if hasattr(run_args, "pivot_norm") else "none",
+        )
+        run_args.pivot_weight = conf.get(
+            "pivot_weight",
+            run_args.pivot_weight if hasattr(run_args, "pivot_weight") else "none",
+        )
+        run_args.pivot_m = conf.get(
+            "pivot_m", run_args.pivot_m if hasattr(run_args, "pivot_m") else 16
+        )
         run_args.topC = args.topC
         run_args.pivot_prune_to = args.pivot_prune_to
         run_args.pivot_efSearch = args.pivot_efSearch
@@ -275,7 +295,13 @@ def main() -> None:
             "method": res.get("method", "pivot_hnsw"),
         }
         rows.append(row)
-        logging.info("Finished %s: CandRecall@topC=%.3f, Recall@10=%.3f, avg_total_ms=%.1f", row["group"], row["CandRecall@topC"], row["Recall@10"], row["avg_total_ms"])
+        logging.info(
+            "Finished %s: CandRecall@topC=%.3f, Recall@10=%.3f, avg_total_ms=%.1f",
+            row["group"],
+            row["CandRecall@topC"],
+            row["Recall@10"],
+            row["avg_total_ms"],
+        )
 
     best = pick_best(rows)
 
@@ -354,7 +380,13 @@ def main() -> None:
     plt.close(fig)
 
     logging.info("Saved shortlist results: %s, %s", results_path, json_path)
-    logging.info("Best config: %s (CandRecall@topC=%.3f, Recall@10=%.3f, avg_total_ms=%.1f)", best.get("group"), best.get("CandRecall@topC"), best.get("Recall@10"), best.get("avg_total_ms"))
+    logging.info(
+        "Best config: %s (CandRecall@topC=%.3f, Recall@10=%.3f, avg_total_ms=%.1f)",
+        best.get("group"),
+        best.get("CandRecall@topC"),
+        best.get("Recall@10"),
+        best.get("avg_total_ms"),
+    )
 
 
 if __name__ == "__main__":
