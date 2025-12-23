@@ -167,13 +167,14 @@ def _download_and_extract_zip(
     """Download a zip once and extract; reuse existing artifacts."""
 
     extract_dir.parent.mkdir(parents=True, exist_ok=True)
-    if extract_dir.exists():
-        return
+
+    # If directory exists but is empty or missing target files, still extract
+    dir_has_content = extract_dir.exists() and any(extract_dir.rglob("*"))
 
     if not zip_path.exists():
         _download_file(url, zip_path, desc=desc)
 
-    if not extract_dir.exists():
+    if not dir_has_content:
         logging.info("Extracting %s to %s", zip_path, extract_dir)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir.parent)
