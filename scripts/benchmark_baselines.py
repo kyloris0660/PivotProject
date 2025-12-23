@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -116,6 +117,17 @@ def parse_args() -> argparse.Namespace:
         "--coco_persist_tag",
         default="auto",
         help="Tag for Drive manifest (auto derives split/max_images/seed)",
+    )
+    p.add_argument("--coco_root", default="", help="Optional local COCO root")
+    p.add_argument(
+        "--save_outputs_to_drive",
+        action="store_true",
+        help="Copy this run's results/plots to Google Drive",
+    )
+    p.add_argument(
+        "--drive_out_root",
+        default="/content/drive/MyDrive/PivotProjectResults",
+        help="Drive root for outputs when save_outputs_to_drive is set",
     )
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
@@ -908,7 +920,7 @@ def main() -> None:
         max_captions=args.max_captions,
         k=args.k,
         allow_coco_train_download=args.allow_coco_train_download,
-        coco_root=None,
+        coco_root=args.coco_root or None,
         drive_sync=drive_sync,
     )
 
@@ -1061,6 +1073,41 @@ def main() -> None:
     logging.info(
         "Benchmark saved: %s, %s, plot: %s", summary_path, json_path, plot_path
     )
+
+    if args.save_outputs_to_drive:
+        if not Path("/content/drive").exists():
+            logging.info(
+                "save_outputs_to_drive requested but /content/drive not found; skipping Drive copy. In Colab run drive.mount('/content/drive')."
+            )
+        else:
+            max_label = args.max_images if args.max_images is not None else "all"
+            run_dir = (
+                Path(args.drive_out_root)
+                / "runs"
+                / f"{timestamp}_{args.dataset}_{args.split}_n{max_label}"
+            )
+            ensure_dir(run_dir)
+            for p in (summary_path, json_path, plot_path):
+                if p.exists():
+                    shutil.copy2(p, run_dir / p.name)
+            save_json(vars(args), run_dir / "args_dump.json")
+
+            coco_zip = Path("/content/coco2017/train2017.zip")
+            if coco_zip.exists():
+                dst_zip = (
+                    Path(args.drive_out_root)
+                    / "datasets"
+                    / "coco2017"
+                    / coco_zip.name
+                )
+                ensure_dir(dst_zip.parent)
+                if not dst_zip.exists():
+                    try:
+                        shutil.copy2(coco_zip, dst_zip)
+                    except Exception as exc:  # noqa: BLE001
+                        logging.warning("Failed to copy coco zip to Drive: %s", exc)
+
+            logging.info("Saved outputs to Drive: %s", run_dir)
 
 
 if __name__ == "__main__":

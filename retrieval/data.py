@@ -301,6 +301,12 @@ def _download_and_extract_zip(
 
 def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict]:
     ann_dir = cache_root / "annotations"
+    ann_path = ann_dir / f"captions_{split_key}.json"
+
+    if ann_path.exists():
+        return _load_coco_annotations_from_file(ann_path)
+
+    ann_dir = cache_root / "annotations"
     ann_zip = ann_dir / "annotations_trainval2017.zip"
     extract_dir = ann_dir
     _download_and_extract_zip(
@@ -318,6 +324,21 @@ def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict
         raise ValueError(f"Unsupported COCO split '{split_key}' for annotations")
 
     ann_path = ann_map[split_key]
+    if not ann_path.exists():
+        raise FileNotFoundError(f"Annotation file missing: {ann_path}")
+
+    with ann_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    images = {img["id"]: img for img in data.get("images", [])}
+    captions_by_image: Dict[int, List[str]] = {}
+    for ann in data.get("annotations", []):
+        img_id = ann["image_id"]
+        captions_by_image.setdefault(img_id, []).append(ann.get("caption", ""))
+    return images, captions_by_image
+
+
+def _load_coco_annotations_from_file(ann_path: Path) -> Tuple[Dict, Dict]:
     if not ann_path.exists():
         raise FileNotFoundError(f"Annotation file missing: {ann_path}")
 
@@ -460,20 +481,27 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
         )
 
     split_key = split_map[config.split]
-    if split_key == "train2017" and not config.allow_coco_train_download:
+    if (
+        split_key == "train2017"
+        and not config.allow_coco_train_download
+        and not Path(config.coco_root or "").joinpath("annotations", f"captions_{split_key}.json").exists()
+    ):
         raise RuntimeError(
             "train2017 is large (~118k images, 18GB). Pass --allow_coco_train_download to enable downloading train images."
         )
 
     local_cache_root = config.cache_path("datasets", "coco2017")
     cache_root = Path(config.coco_root) if config.coco_root else local_cache_root
+    split_dir, captions_path = _coco_split_paths(cache_root, split_key)
 
     drive_sync = config.drive_sync or {}
     persist_to_drive = bool(drive_sync.get("persist_to_drive"))
     drive_root_str = drive_sync.get("drive_root")
     drive_root = Path(drive_root_str) if drive_root_str else None
     max_images_requested = config.max_images
-    default_tag = f"coco2017_{split_key}_n{max_images_requested or 'all'}_seed{config.seed}"
+    default_tag = (
+        f"coco2017_{split_key}_n{max_images_requested or 'all'}_seed{config.seed}"
+    )
     drive_tag = drive_sync.get("tag") or default_tag
     drive_available = bool(persist_to_drive and drive_root and drive_root.exists())
     if persist_to_drive and not drive_available:
@@ -500,7 +528,12 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
         if reused:
             cache_root = local_cache_root
 
-    images_meta, captions_by_image = _load_coco_annotations(cache_root, split_key)
+    if captions_path.exists():
+        images_meta, captions_by_image = _load_coco_annotations_from_file(
+            captions_path
+        )
+    else:
+        images_meta, captions_by_image = _load_coco_annotations(cache_root, split_key)
 
     all_image_ids = list(images_meta.keys())
     max_images = (
@@ -536,11 +569,12 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
     used_ids: List[str] = []
     used_files: List[str] = []
 
-    split_dir, captions_path = _coco_split_paths(cache_root, split_key)
     split_dir.mkdir(parents=True, exist_ok=True)
 
     if split_key == "val2017":
-        split_dir = _ensure_coco_images_zip(cache_root, split_key)
+        has_val_images = split_dir.exists() and any(split_dir.glob("*.jpg"))
+        if not has_val_images:
+            split_dir = _ensure_coco_images_zip(cache_root, split_key)
         iterator_items = selected_items
         desc = "dataset"
     else:
@@ -573,7 +607,9 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
             logging.warning("Failed to open image %s: %s", img_path, exc)
             continue
 
-        caps = captions_by_image.get(int(img_id) if isinstance(img_id, str) and img_id.isdigit() else img_id, [])
+        caps = captions_by_image.get(
+            int(img_id) if isinstance(img_id, str) and img_id.isdigit() else img_id, []
+        )
         if not caps:
             continue
 
@@ -601,7 +637,14 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
             "image_ids": used_ids,
             "file_names": used_files,
         }
-        _persist_subset_to_drive(cache_root, drive_root, split_key, drive_tag, manifest_payload, captions_path)
+        _persist_subset_to_drive(
+            cache_root,
+            drive_root,
+            split_key,
+            drive_tag,
+            manifest_payload,
+            captions_path,
+        )
 
     logging.info("Loaded %d images via COCO fallback", len(records))
     return records
