@@ -74,9 +74,17 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pivot_source",
-        choices=["images", "captions", "union", "mixture", "caption_guided_images"],
+        choices=[
+            "images",
+            "captions",
+            "union",
+            "mixture",
+            "caption_guided_images",
+            "caption_cluster_guided_images",
+        ],
         default="images",
     )
+    p.add_argument("--pivot_caption_sample", type=int, default=50000)
     p.add_argument("--pivot_mix_ratio", type=float, default=0.5)
     p.add_argument("--pivot_pool_size", type=int, default=50000)
     p.add_argument("--pivot_coord", choices=["sim", "dist"], default="sim")
@@ -568,6 +576,7 @@ def pivot_hnsw_method(
         pivot_source=args.pivot_source,
         pivot_mix_ratio=args.pivot_mix_ratio,
         pivot_pool_size=args.pivot_pool_size,
+        pivot_caption_sample=getattr(args, "pivot_caption_sample", base_config.pivot_caption_sample),
         pivot_coord=args.pivot_coord,
         pivot_metric=args.pivot_metric,
         pivot_weight_eps=args.pivot_weight_eps,
@@ -578,9 +587,35 @@ def pivot_hnsw_method(
     image_embs = ensure_float32_contig(image_embs)
     caption_embs = ensure_float32_contig(caption_embs)
 
-    pivots, _ = select_pivots(
+    pivots, pivot_indices, pivot_meta = select_pivots(
         image_embs, image_ids, caption_embs, caption_image_ids, cfg
     )
+    pivot_stats = pivot_meta.get("stats", {}) if isinstance(pivot_meta, dict) else {}
+    pivot_image_ids = pivot_meta.get("pivot_image_ids") if isinstance(pivot_meta, dict) else None
+    if pivot_image_ids:
+        assert len(pivot_image_ids) == len(pivots)
+        missing = [pid for pid in pivot_image_ids if pid not in set(image_ids)]
+        if missing:
+            raise ValueError(f"Pivot image ids missing from images: {missing[:3]}")
+
+    if not pivot_stats:
+        uniq = len(set(pivot_indices.tolist()))
+        pivot_stats = {
+            "pivot_unique_count": uniq,
+            "pivot_duplicate_count": len(pivot_indices) - uniq,
+        }
+    # Lightweight coverage probe on a small caption sample
+    cover_q = min(caption_embs.shape[0], 200)
+    if cover_q > 0:
+        rng = np.random.RandomState(cfg.seed)
+        cover_idx = rng.choice(caption_embs.shape[0], size=cover_q, replace=False)
+        cover_caps = caption_embs[cover_idx]
+        cover_caps = cover_caps / np.linalg.norm(cover_caps, axis=1, keepdims=True)
+        piv_norm = pivots / np.linalg.norm(pivots, axis=1, keepdims=True)
+        cover_max = np.max(cover_caps @ piv_norm.T, axis=1)
+        pivot_stats.setdefault("pivot_cover_maxsim_mean", float(np.mean(cover_max)))
+        pivot_stats.setdefault("pivot_cover_maxsim_p50", float(np.percentile(cover_max, 50)))
+        pivot_stats.setdefault("pivot_cover_maxsim_p90", float(np.percentile(cover_max, 90)))
     pivots = ensure_float32_contig(pivots)
 
     pivot_coords = compute_pivot_coordinates(
@@ -800,6 +835,7 @@ def pivot_hnsw_method(
         "cand_hit_rank_mean_pruned": hit_rank_mean_pruned,
         "cand_hit_rank_median_pruned": hit_rank_median_pruned,
     }
+    result.update(pivot_stats)
     # recalls filled by caller
     result["preds"] = preds  # temporary; stripped later
     return result
@@ -823,6 +859,7 @@ def main() -> None:
         pivot_source=args.pivot_source,
         pivot_mix_ratio=args.pivot_mix_ratio,
         pivot_pool_size=args.pivot_pool_size,
+        pivot_caption_sample=args.pivot_caption_sample,
         pivot_coord=args.pivot_coord,
         pivot_metric=args.pivot_metric,
         pivot_weight=args.pivot_weight,

@@ -63,9 +63,17 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--pivot_source",
-        choices=["images", "captions", "union", "mixture", "caption_guided_images"],
+        choices=[
+            "images",
+            "captions",
+            "union",
+            "mixture",
+            "caption_guided_images",
+            "caption_cluster_guided_images",
+        ],
         default="images",
     )
+    p.add_argument("--pivot_caption_sample", type=int, default=50000)
     p.add_argument("--pivot_mix_ratio", type=float, default=0.5)
     p.add_argument("--pivot_pool_size", type=int, default=50000)
     p.add_argument("--pivot_coord", choices=["sim", "dist"], default="sim")
@@ -118,6 +126,7 @@ def main() -> None:
         pivot_source=args.pivot_source,
         pivot_mix_ratio=args.pivot_mix_ratio,
         pivot_pool_size=args.pivot_pool_size,
+        pivot_caption_sample=args.pivot_caption_sample,
         pivot_coord=args.pivot_coord,
         pivot_metric=args.pivot_metric,
         pivot_weight=args.pivot_weight,

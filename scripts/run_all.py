@@ -87,7 +87,10 @@ def main() -> None:
         caption_pairs, config, model, processor
     )
 
-    pivots, pivot_indices = select_pivots(image_embs, caption_embs, config)
+    caption_image_ids = [pair[1] for pair in caption_pairs]
+    pivots, pivot_indices, _ = select_pivots(
+        image_embs, image_ids, caption_embs, caption_image_ids, config
+    )
     pivot_coords = compute_pivot_coordinates(
         image_embs, pivots, config, config.split, kind="images"
     )

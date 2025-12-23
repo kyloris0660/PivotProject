@@ -19,6 +19,7 @@ class RetrievalConfig:
     pivot_source: str = "images"
     pivot_mix_ratio: float = 0.5
     pivot_pool_size: int = 50000
+    pivot_caption_sample: int = 50000
     pivot_coord: str = "sim"
     pivot_metric: str = "l2"
     pivot_weight: str = "none"

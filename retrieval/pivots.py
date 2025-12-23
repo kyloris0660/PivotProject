@@ -33,6 +33,40 @@ def _subset(arr: np.ndarray, size: int, rng: np.random.RandomState) -> np.ndarra
     return arr[idx]
 
 
+def _pool_tag(config: RetrievalConfig) -> str:
+    extra = ""
+    if config.pivot_source == "caption_cluster_guided_images":
+        extra = f"_capsamp{config.pivot_caption_sample}"
+    return f"src{config.pivot_source}_mix{config.pivot_mix_ratio}_pool{config.pivot_pool_size}{extra}"
+
+
+def _fps_with_seed(
+    pool: np.ndarray, seed_indices: list[int], target_m: int, rng: np.random.RandomState
+) -> list[int]:
+    """Farthest-point sampling continuing from provided seeds (on normalized pool)."""
+
+    if target_m <= 0:
+        return []
+
+    selected: list[int] = list(seed_indices)
+    if not selected:
+        selected.append(int(rng.choice(pool.shape[0])))
+
+    min_dists = np.full(pool.shape[0], np.inf, dtype=np.float32)
+    for idx in selected:
+        # cosine distance on normalized vectors
+        min_dists = np.minimum(min_dists, 1.0 - pool @ pool[idx])
+        min_dists[idx] = -np.inf  # do not reselect the same point
+
+    while len(selected) < target_m:
+        next_idx = int(np.argmax(min_dists))
+        selected.append(next_idx)
+        min_dists = np.minimum(min_dists, 1.0 - pool @ pool[next_idx])
+        min_dists[next_idx] = -np.inf
+
+    return selected
+
+
 def build_pivot_pool(
     image_embs: np.ndarray,
     image_ids: list[str],
@@ -104,8 +138,90 @@ def build_pivot_pool(
     else:
         raise ValueError(f"Unknown pivot_source '{source}'")
 
-    tag = f"src{source}_mix{config.pivot_mix_ratio}_pool{config.pivot_pool_size}"
+    tag = _pool_tag(config)
     return pool, tag
+
+
+def _select_caption_cluster_guided_images(
+    image_embs: np.ndarray,
+    image_ids: list[str],
+    caption_embs: np.ndarray,
+    config: RetrievalConfig,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """Cluster captions, pick nearest images per centroid, then FPS fill to m."""
+
+    try:
+        from sklearn.cluster import MiniBatchKMeans
+    except Exception as exc:  # pragma: no cover - import guard
+        raise ImportError("scikit-learn is required for caption_cluster_guided_images") from exc
+
+    rng = np.random.RandomState(config.seed)
+    img_pool = _l2_normalize(image_embs.astype(np.float32, copy=False))
+    cap_pool = _l2_normalize(caption_embs.astype(np.float32, copy=False))
+
+    sample_size = min(cap_pool.shape[0], max(1, config.pivot_caption_sample))
+    cap_sample = cap_pool
+    if cap_pool.shape[0] > sample_size:
+        idx = rng.choice(cap_pool.shape[0], size=sample_size, replace=False)
+        idx.sort()
+        cap_sample = cap_pool[idx]
+
+    logging.info(
+        "Clustering %d sampled captions into %d centroids for pivot guidance",
+        cap_sample.shape[0],
+        config.m,
+    )
+    kmeans = MiniBatchKMeans(
+        n_clusters=config.m,
+        random_state=config.seed,
+        batch_size=2048,
+        n_init="auto",
+    )
+    kmeans.fit(cap_sample)
+    centroids = _l2_normalize(kmeans.cluster_centers_.astype(np.float32, copy=False))
+
+    sims = centroids @ img_pool.T  # (m, N)
+    best_idx = np.argmax(sims, axis=1)
+
+    pivot_indices: list[int] = []
+    seen = set()
+    for idx in best_idx:
+        if idx not in seen:
+            pivot_indices.append(int(idx))
+            seen.add(int(idx))
+
+    if len(pivot_indices) < config.m:
+        logging.info(
+            "Filling %d remaining pivots using farthest-point sampling on images",
+            config.m - len(pivot_indices),
+        )
+        pivot_indices = _fps_with_seed(img_pool, pivot_indices, config.m, rng)
+
+    pivot_vectors = img_pool[pivot_indices].astype(np.float32, copy=False)
+    pool_tag = _pool_tag(config)
+
+    stats: dict = {}
+    unique_count = len(set(pivot_indices))
+    stats["pivot_unique_count"] = unique_count
+    stats["pivot_duplicate_count"] = len(pivot_indices) - unique_count
+
+    # Coverage self-check on a small caption sample
+    cover_sample = min(cap_pool.shape[0], 200)
+    if cover_sample > 0:
+        cover_idx = rng.choice(cap_pool.shape[0], size=cover_sample, replace=False)
+        cover_caps = cap_pool[cover_idx]
+        max_sims = np.max(cover_caps @ pivot_vectors.T, axis=1)
+        stats["pivot_cover_maxsim_mean"] = float(np.mean(max_sims))
+        stats["pivot_cover_maxsim_p50"] = float(np.percentile(max_sims, 50))
+        stats["pivot_cover_maxsim_p90"] = float(np.percentile(max_sims, 90))
+
+    meta = {
+        "indices": pivot_indices,
+        "pool_tag": pool_tag,
+        "pivot_image_ids": [image_ids[i] for i in pivot_indices],
+        "stats": stats,
+    }
+    return pivot_vectors, np.array(pivot_indices, dtype=int), meta
 
 
 def _pivot_cache_suffix(config: RetrievalConfig, tag: str) -> str:
@@ -119,10 +235,41 @@ def select_pivots(
     caption_embs: np.ndarray | None,
     caption_image_ids: list[str] | None,
     config: RetrievalConfig,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, dict]:
     """Select pivots via farthest-point sampling from the configured pool."""
 
     pivot_dir = _pivot_dir(config)
+
+    if config.pivot_source == "caption_cluster_guided_images":
+        if caption_embs is None:
+            raise ValueError(
+                "pivot_source=caption_cluster_guided_images requires caption embeddings"
+            )
+
+        pool_tag = (
+            f"srccaption_cluster_guided_images_mix{config.pivot_mix_ratio}_pool{config.pivot_pool_size}"
+            f"_capsamp{config.pivot_caption_sample}"
+        )
+        suffix = _pivot_cache_suffix(config, pool_tag)
+        pivot_path = pivot_dir / f"pivots_{suffix}.npy"
+        pivot_meta = pivot_dir / f"pivots_{suffix}.json"
+
+        if pivot_path.exists() and pivot_meta.exists() and not config.force_recompute:
+            logging.info("Loading pivots from %s", pivot_path)
+            pivots = np.load(pivot_path)
+            meta = load_json(pivot_meta)
+            pivot_indices = np.array(meta.get("indices", []), dtype=int)
+            return pivots, pivot_indices, meta
+
+        pivots, pivot_indices, meta = _select_caption_cluster_guided_images(
+            image_embs, image_ids, caption_embs, config
+        )
+        meta["pool_tag"] = pool_tag
+        np.save(pivot_path, pivots)
+        save_json(meta, pivot_meta)
+        logging.info("Saved pivots to %s", pivot_path)
+        return pivots, pivot_indices, meta
+
     pool, pool_tag = build_pivot_pool(
         image_embs, image_ids, caption_embs, caption_image_ids, config
     )
@@ -132,7 +279,10 @@ def select_pivots(
 
     if pivot_path.exists() and pivot_meta.exists() and not config.force_recompute:
         logging.info("Loading pivots from %s", pivot_path)
-        return np.load(pivot_path), np.array(load_json(pivot_meta).get("indices", []))
+        pivots = np.load(pivot_path)
+        meta = load_json(pivot_meta)
+        pivot_indices = np.array(meta.get("indices", []))
+        return pivots, pivot_indices, meta
 
     logging.info(
         "Selecting %d pivots using farthest-point sampling from %d pool items",
@@ -156,10 +306,11 @@ def select_pivots(
     pivot_vectors = pool[pivots].astype(np.float32, copy=False)
     pivot_indices = np.array(pivots, dtype=int)
 
+    meta = {"indices": pivot_indices.tolist(), "pool_tag": pool_tag}
     np.save(pivot_path, pivot_vectors)
-    save_json({"indices": pivot_indices.tolist(), "pool_tag": pool_tag}, pivot_meta)
+    save_json(meta, pivot_meta)
     logging.info("Saved pivots to %s", pivot_path)
-    return pivot_vectors, pivot_indices
+    return pivot_vectors, pivot_indices, meta
 
 
 def compute_pivot_coordinates(
@@ -172,10 +323,7 @@ def compute_pivot_coordinates(
     """Map embeddings to pivot coordinates (sim or dist), cached per config."""
 
     pivot_dir = _pivot_dir(config)
-    pool_tag = _pivot_cache_suffix(
-        config,
-        f"src{config.pivot_source}_mix{config.pivot_mix_ratio}_pool{config.pivot_pool_size}",
-    )
+    pool_tag = _pivot_cache_suffix(config, _pool_tag(config))
     coord_tag = f"{kind}_{config.dataset}_{split}_{config.pivot_coord}_{config.pivot_metric}_{pool_tag}"
     coord_path = pivot_dir / f"pivot_coords_{coord_tag}.npy"
     if coord_path.exists() and not config.force_recompute:
@@ -207,10 +355,7 @@ def compute_pivot_coordinates(
 
 def pivot_weight_paths(config: RetrievalConfig) -> Tuple[Path, Path]:
     pivot_dir = _pivot_dir(config)
-    suffix = _pivot_cache_suffix(
-        config,
-        f"src{config.pivot_source}_mix{config.pivot_mix_ratio}_pool{config.pivot_pool_size}",
-    )
+    suffix = _pivot_cache_suffix(config, _pool_tag(config))
     fname = f"pivot_weights_{config.pivot_weight}_{config.pivot_coord}_{config.pivot_metric}_{suffix}.npy"
     meta = f"pivot_weights_{config.pivot_weight}_{config.pivot_coord}_{config.pivot_metric}_{suffix}.json"
     return pivot_dir / fname, pivot_dir / meta

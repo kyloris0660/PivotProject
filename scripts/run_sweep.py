@@ -53,7 +53,10 @@ def parse_args() -> argparse.Namespace:
 def run_one(
     config: RetrievalConfig, records, caption_pairs, image_embs, image_ids, caption_embs
 ) -> Dict[str, float]:
-    pivots, _ = select_pivots(image_embs, caption_embs, config)
+    caption_image_ids = [pair[1] for pair in caption_pairs]
+    pivots, _, _ = select_pivots(
+        image_embs, image_ids, caption_embs, caption_image_ids, config
+    )
     pivot_coords = compute_pivot_coordinates(
         image_embs, pivots, config, config.split, kind="images"
     )
