@@ -153,7 +153,9 @@ def _select_caption_cluster_guided_images(
     try:
         from sklearn.cluster import MiniBatchKMeans
     except Exception as exc:  # pragma: no cover - import guard
-        raise ImportError("scikit-learn is required for caption_cluster_guided_images") from exc
+        raise ImportError(
+            "scikit-learn is required for caption_cluster_guided_images"
+        ) from exc
 
     rng = np.random.RandomState(config.seed)
     img_pool = _l2_normalize(image_embs.astype(np.float32, copy=False))
