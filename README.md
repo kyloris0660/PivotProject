@@ -121,6 +121,13 @@ python -m scripts.benchmark_scaling --dataset coco_captions --split val --device
 	--orig_topC 600 --orig_hnsw_efSearch 256 --orig_hnsw_M 32 --num_threads 8 --rerank_device cuda
 ```
 
+5) 短名单消融（coco val 5k，8 组预设 pivot 配置，快速找 CandRecall ≥0.50）：
+```bash
+python -m scripts.ablate_pivot_shortlist --dataset coco_captions --split val --device cuda \
+	--max_images 5000 --n_queries 1000
+```
+输出 `results/shortlist_*.csv|json` 与两张散点图（CandRecall@topC vs latency、R@10 vs latency）。若 CandRecall@topC ≥ 0.50 即视为 pivot 候选层“可用”；可再试 `--pivot_prune_to 200` 做速度优化。
+
 ### COCO 数据集稳定性
 - HF 拉取失败时自动 fallback 到官方 COCO zip 整包下载（annotations + val/train 图片），支持断点缓存与重复解压复用；val 默认截断 5k，train 需显式 `--allow_coco_train_download`（~18GB）。
 - `_download_file` 带 3 次指数退避重试并自动 http 回退，适配 Colab SSL 问题。
