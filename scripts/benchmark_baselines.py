@@ -423,6 +423,7 @@ def orig_hnsw_method(
     base_config: RetrievalConfig,
     args: argparse.Namespace,
 ) -> Dict[str, float | int | str]:
+    pivot_preset = getattr(args, "pivot_preset", "none")
     cfg = replace(
         base_config,
         ef_search=args.orig_hnsw_efSearch,
@@ -542,7 +543,7 @@ def orig_hnsw_method(
         "pivot_prune_to": 0,
         "prune_ms": prune_ms,
         "rerank_device": rerank_device,
-        "pivot_preset": args.pivot_preset,
+        "pivot_preset": pivot_preset,
         "CandRecall@topC": cand_recall,
         "CandRecall@pruned": cand_recall_pruned,
         "cand_hit_rank_mean": hit_rank_mean,
@@ -563,6 +564,7 @@ def pivot_hnsw_method(
     base_config: RetrievalConfig,
     args: argparse.Namespace,
 ) -> Dict[str, float | int | str]:
+    pivot_preset = getattr(args, "pivot_preset", "none")
     # Build a config for pivot path
     cfg = replace(
         base_config,
@@ -829,7 +831,7 @@ def pivot_hnsw_method(
         "prune_enabled": prune_enabled,
         "prune_ms": prune_ms,
         "rerank_device": rerank_device,
-        "pivot_preset": args.pivot_preset,
+        "pivot_preset": pivot_preset,
         "CandRecall@topC": cand_recall_top,
         "CandRecall@pruned": cand_recall_pruned,
         "cand_hit_rank_mean": hit_rank_mean,
@@ -846,6 +848,7 @@ def pivot_hnsw_method(
 def main() -> None:
     args = parse_args()
     args = apply_pivot_preset(args)
+    pivot_preset = getattr(args, "pivot_preset", "none")
     setup_logging()
     set_seed(args.seed)
 
@@ -942,7 +945,7 @@ def main() -> None:
         "pivot_prune_to": 0,
         "prune_ms": 0.0,
         "rerank_device": "cpu",
-        "pivot_preset": args.pivot_preset,
+        "pivot_preset": pivot_preset,
         "CandRecall@topC": 1.0,
         "CandRecall@pruned": 1.0,
         "cand_hit_rank_mean": -1.0,

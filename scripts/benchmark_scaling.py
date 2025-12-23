@@ -82,6 +82,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pivot_learn_pairs", type=int, default=20000)
     p.add_argument("--pivot_learn_queries", type=int, default=2000)
     p.add_argument("--pivot_learn_negs", type=int, default=8)
+    p.add_argument(
+        "--pivot_preset",
+        choices=["none", "shortlist_g8"],
+        default="none",
+        help="Optional preset for pivot config",
+    )
     p.add_argument("--batch_size_text", type=int, default=64)
     p.add_argument("--batch_size_image", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
@@ -97,6 +103,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow downloading large COCO train2017 images in fallback mode",
     )
+    p.add_argument("--max_images", type=int, default=None)
     p.add_argument("--pivot_sample", type=int, default=5000)
     p.add_argument("--efc", dest="ef_construction", type=int, default=200)
     p.add_argument("--force_recompute", action="store_true")
@@ -106,6 +113,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args = base.apply_pivot_preset(args)
+    pivot_preset = getattr(args, "pivot_preset", "none")
     setup_logging()
     set_seed(args.seed)
 
@@ -113,6 +122,7 @@ def main() -> None:
     if not Ns:
         raise ValueError("Ns must not be empty")
     max_N = max(Ns)
+    max_images = args.max_images if args.max_images is not None else max_N
 
     base_config = RetrievalConfig(
         dataset=args.dataset,
@@ -137,7 +147,7 @@ def main() -> None:
         seed=args.seed,
         ef_construction=args.ef_construction,
         force_recompute=args.force_recompute,
-        max_images=max_N,
+        max_images=max_images,
         max_captions=args.max_captions,
         k=args.k,
         allow_coco_train_download=args.allow_coco_train_download,

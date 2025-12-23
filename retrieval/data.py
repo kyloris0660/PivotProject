@@ -213,7 +213,7 @@ def _load_coco_annotations(cache_root: Path, split_key: str) -> Tuple[Dict, Dict
     return images, captions_by_image
 
 
-def _ensure_coco_images(cache_root: Path, split_key: str) -> Path:
+def _ensure_coco_images_zip(cache_root: Path, split_key: str) -> Path:
     zips_dir = cache_root / "zips"
     zips_dir.mkdir(parents=True, exist_ok=True)
     zip_path = zips_dir / f"{split_key}.zip"
@@ -360,18 +360,39 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
         "COCO fallback using split=%s, images=%d", split_key, len(selected_ids)
     )
 
-    split_dir = _ensure_coco_images(cache_root, split_key)
-
     records: List[Dict] = []
-    for img_id in tqdm(selected_ids, desc="dataset"):
+    split_dir = cache_root / split_key
+    split_dir.mkdir(parents=True, exist_ok=True)
+
+    if split_key == "val2017":
+        split_dir = _ensure_coco_images_zip(cache_root, split_key)
+        iterator_ids = selected_ids
+        desc = "dataset"
+    else:
+        iterator_ids = selected_ids
+        desc = "download_train_subset"
+
+    for img_id in tqdm(iterator_ids, desc=desc):
         meta = images_meta[img_id]
         file_name = meta.get("file_name")
         if not file_name:
             continue
         img_path = split_dir / file_name
+
         if not img_path.exists():
-            logging.warning("Image missing after extract: %s", img_path)
-            continue
+            url = f"http://images.cocodataset.org/{split_key}/{file_name}"
+            try:
+                with requests.get(url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    img_path.parent.mkdir(parents=True, exist_ok=True)
+                    with img_path.open("wb") as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Failed to download image %s: %s", url, exc)
+                continue
+
         try:
             image = Image.open(img_path).convert("RGB")
         except Exception as exc:  # noqa: BLE001
@@ -390,6 +411,9 @@ def load_coco_captions_fallback(config: RetrievalConfig) -> List[Dict]:
                 "split": config.split,
             }
         )
+
+        if len(records) >= max_images:
+            break
 
     logging.info("Loaded %d images via COCO fallback", len(records))
     return records

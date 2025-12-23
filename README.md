@@ -128,6 +128,14 @@ python -m scripts.benchmark_scaling --dataset coco_captions --split val --device
 	--orig_topC 600 --orig_hnsw_efSearch 256 --orig_hnsw_M 32 --num_threads 8 --rerank_device cuda
 ```
 
+Colab one-liner（本地磁盘、不挂 Drive，train 子集 + 允许下载前 N 张）：
+```bash
+python -m scripts.benchmark_scaling --dataset coco_captions --source hf --split train --device cuda \
+  --allow_coco_train_download --max_images 50000 --Ns 5000,10000,20000,50000 \
+  --n_queries 1000 --batch_size_text 128 --batch_size_image 128 --pivot_preset shortlist_g8 \
+  --pivot_source images --pivot_prune_to 0 --num_threads 8 --rerank_device cuda
+```
+
 5) 短名单消融（coco val 5k，8 组预设 pivot 配置，快速找 CandRecall ≥0.50）：
 ```bash
 python -m scripts.ablate_pivot_shortlist --dataset coco_captions --split val --device cuda \
